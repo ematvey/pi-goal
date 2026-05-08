@@ -1,11 +1,10 @@
-import { StringEnum, Type, type AssistantMessage } from "@mariozechner/pi-ai";
-import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { StringEnum, Type, type AssistantMessage } from "@earendil-works/pi-ai";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 const STATE_ENTRY = "pi-goal-state";
-const DEFAULT_MAX_TURNS = 50;
 const COMPLETE_STATUS = "complete";
 const GOALS_DIR = ".pi/goals";
 const ARCHIVED_GOALS_DIR = ".pi/goals/archived";
@@ -175,7 +174,7 @@ function tokenizeArgs(raw: string): string[] {
 function parseGoalArgs(raw: string): ParsedGoalArgs | { error: string } {
 	const tokens = tokenizeArgs(raw.trim());
 	let tokenBudget: number | undefined;
-	let maxTurns: number | undefined = DEFAULT_MAX_TURNS;
+	let maxTurns: number | undefined;
 	let autoContinue = true;
 	let index = 0;
 
@@ -291,12 +290,12 @@ function detailedSummary(goal: GoalRecord | null): string {
 function goalPrompt(goal: GoalRecord): string {
 	const g = snapshotGoal(goal);
 	const remaining = g.tokenBudget ? Math.max(0, g.tokenBudget - g.tokensUsed) : undefined;
-	return `[PI GOAL ACTIVE goalId=${g.id}]\nObjective: ${g.objective}\nStatus: ${statusLabel(g.status)}\nElapsed: ${formatDuration(g.timeUsedSeconds)}\nTokens used: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)} (${formatTokens(remaining ?? 0)} remaining)` : ""}\nTurns used: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}\n\nContinue working toward the objective until it is actually achieved. Use get_goal when you need the current state. Call update_goal with status=complete only when no required work remains. If blocked, explain the blocker to the user instead of marking the goal complete. The user may tweak this objective during the run; always follow the latest objective shown here.`;
+	return `[PI GOAL ACTIVE goalId=${g.id}]\nObjective: ${g.objective}\nStatus: ${statusLabel(g.status)}\nElapsed: ${formatDuration(g.timeUsedSeconds)}\nTokens used: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)} (${formatTokens(remaining ?? 0)} remaining)` : ""}\nTurns used: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}\n\nContinue working toward the objective until it is actually achieved. Do not pause for confirmation just because a phase, chapter, file, or checklist item is finished; immediately choose the next concrete action toward the objective. Use get_goal when you need the current state. Call update_goal with status=complete only when no required work remains. If blocked, explain the blocker to the user instead of marking the goal complete. The user may tweak this objective during the run; always follow the latest objective shown here.`;
 }
 
 function continuationPrompt(goal: GoalRecord): string {
 	const g = snapshotGoal(goal);
-	return `[GOAL CONTINUATION goalId=${g.id}]\nContinue the active goal:\n${g.objective}\n\nWork autonomously on the next useful step. If the goal is now fully achieved, call update_goal with status=complete and then summarize the result. If you are blocked, explain exactly what is blocking progress.`;
+	return `[GOAL CONTINUATION goalId=${g.id}]\nContinue working toward the active goal.\n\nObjective:\n${g.objective}\n\nBudget:\n- Elapsed: ${formatDuration(g.timeUsedSeconds)}\n- Tokens used: ${formatTokens(g.tokensUsed)}${g.tokenBudget ? ` / ${formatTokens(g.tokenBudget)}` : ""}\n- Turns used: ${g.turns}${g.maxTurns ? ` / ${g.maxTurns}` : ""}\n\nAvoid repeating work that is already done. Do not pause for confirmation after a partial milestone; if the objective implies a sequence, continue with the next item immediately. Before deciding that the goal is achieved, audit the objective against real evidence in the current project state. If any requirement is missing, incomplete, or unverified, keep working. If the goal is fully achieved, call update_goal with status=complete and then summarize the result. If you are blocked, explain exactly what is blocking progress.`;
 }
 
 function timestampForFile(iso = nowIso()): string {
@@ -644,7 +643,16 @@ function extractGoalIdFromInjectedMessage(text: string): string | null {
 export default function goalExtension(pi: ExtensionAPI): void {
 	let goal: GoalRecord | null = null;
 	let continuationQueuedFor: string | null = null;
+	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
 	let runningGoalId: string | null = null;
+
+	function clearContinuationSchedule(): void {
+		if (continuationTimer) {
+			clearTimeout(continuationTimer);
+			continuationTimer = null;
+		}
+		continuationQueuedFor = null;
+	}
 
 	function syncGoalPromptFromDisk(ctx: ExtensionContext): void {
 		if (goal && goal.status !== "complete") goal = mergeGoalPromptFromDisk(ctx, goal);
@@ -705,14 +713,21 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (goal && goal.status !== "complete") {
 			goal = resumeActiveClock(mergeGoalPromptFromDisk(ctx, goal));
 		}
-		continuationQueuedFor = null;
+		clearContinuationSchedule();
 		runningGoalId = null;
 		updateUI(ctx);
 	}
 
 	function setGoal(next: GoalRecord | null, ctx: ExtensionContext, shouldPersist = true): void {
 		goal = next;
-		if (!goal) continuationQueuedFor = null;
+		if (
+			!goal
+			|| goal.status !== "active"
+			|| !goal.autoContinue
+			|| (continuationQueuedFor !== null && continuationQueuedFor !== goal.id)
+		) {
+			clearContinuationSchedule();
+		}
 		if (shouldPersist) persist(ctx);
 		updateUI(ctx);
 	}
@@ -749,16 +764,35 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function queueContinuation(ctx: ExtensionContext, force = false): void {
-		if (!goal || goal.status !== "active" || !goal.autoContinue) return;
-		if (!force && continuationQueuedFor === goal.id) return;
-		if (ctx.hasPendingMessages()) return;
-		continuationQueuedFor = goal.id;
+	function sendQueuedContinuation(ctx: ExtensionContext, goalId: string): void {
+		continuationTimer = null;
+		if (!goal || goal.id !== goalId || goal.status !== "active" || !goal.autoContinue) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
+		if (ctx.hasPendingMessages()) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
 		const prompt = continuationPrompt(goal);
 		if (ctx.isIdle()) {
 			pi.sendUserMessage(prompt);
 		} else {
 			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		}
+	}
+
+	function queueContinuation(ctx: ExtensionContext, force = false): void {
+		if (!goal || goal.status !== "active" || !goal.autoContinue) return;
+		if (!force && continuationQueuedFor === goal.id) return;
+		if (ctx.hasPendingMessages()) return;
+		const goalId = goal.id;
+		continuationQueuedFor = goalId;
+		if (continuationTimer) clearTimeout(continuationTimer);
+		if (ctx.isIdle()) {
+			sendQueuedContinuation(ctx, goalId);
+		} else {
+			continuationTimer = setTimeout(() => sendQueuedContinuation(ctx, goalId), 0);
 		}
 	}
 
@@ -917,7 +951,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		parameters: Type.Object({
 			objective: Type.String({ description: "Concrete objective to pursue." }),
 			tokenBudget: Type.Optional(Type.Number({ description: "Optional positive token budget." })),
-			maxTurns: Type.Optional(Type.Number({ description: "Optional maximum autonomous turns. 0 or omitted uses the default." })),
+			maxTurns: Type.Optional(Type.Number({ description: "Optional maximum autonomous turns. 0 or omitted means no turn limit." })),
 			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Defaults to true." })),
 		}),
 		executionMode: "sequential",
@@ -931,7 +965,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const parsed: ParsedGoalArgs = {
 				objective: params.objective.trim(),
 				tokenBudget: params.tokenBudget && params.tokenBudget > 0 ? Math.floor(params.tokenBudget) : undefined,
-				maxTurns: params.maxTurns && params.maxTurns > 0 ? Math.floor(params.maxTurns) : DEFAULT_MAX_TURNS,
+				maxTurns: params.maxTurns && params.maxTurns > 0 ? Math.floor(params.maxTurns) : undefined,
 				autoContinue: params.autoContinue ?? true,
 			};
 			if (!parsed.objective) throw new Error("Goal objective must not be empty.");
@@ -1004,7 +1038,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (staleGoalId && goal?.id !== staleGoalId) return { action: "handled" as const };
 	});
 
-	pi.on("session_start", async (_event, ctx) => loadState(ctx));
+	pi.on("session_start", async (_event, ctx) => {
+		loadState(ctx);
+		queueContinuation(ctx, true);
+	});
 	pi.on("session_tree", async (_event, ctx) => loadState(ctx));
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -1068,6 +1105,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		clearContinuationSchedule();
 		if (goal) persist(ctx, { suspendActiveClock: true });
 	});
 }

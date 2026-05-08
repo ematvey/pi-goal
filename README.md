@@ -121,7 +121,7 @@ Archives the current unfinished goal and removes it from the active session stat
 Flags must appear before the objective.
 
 - `--tokens <n|k|m>` or `--token-budget <n|k|m>`: pause after the estimated model token usage reaches the budget. Examples: `50000`, `50k`, `1.5m`.
-- `--max-turns <n>`: pause after this many autonomous goal turns. `0` disables the turn limit.
+- `--max-turns <n>`: pause after this many autonomous goal turns. There is no turn limit by default; `0` also disables the turn limit.
 - `--no-auto` or `--no-start`: create the goal and keep it in context, but do not automatically send continuation prompts.
 - `--auto` or `--start`: explicitly enable autonomous continuation. This is the default.
 
@@ -137,13 +137,13 @@ The extension exposes three tools to the model:
 
 ## How Autonomous Continuation Works
 
-When a goal is active and auto-continue is enabled, pi injects goal context into the system prompt and sends follow-up continuation messages after each agent turn. Each injected goal message includes a goal id. If the user replaces or clears the goal while a run is in flight, stale continuations and stale completion attempts are ignored.
+When a goal is active and auto-continue is enabled, pi injects goal context into the system prompt and starts a continuation turn after each agent turn has fully returned to idle. Active auto-continue goals are also restarted when the session starts or resumes. Each injected goal message includes a goal id. If the user replaces or clears the goal while a run is in flight, stale continuations and stale completion attempts are ignored.
 
 Autonomous continuation stops when:
 
 - the agent calls `update_goal` with `status=complete`;
 - the token budget is reached;
-- the max-turn budget is reached;
+- the configured max-turn budget is reached;
 - the user runs `/goal pause` or `/goal clear`;
 - the user aborts an agent run, which pauses the goal.
 
@@ -182,7 +182,7 @@ For safety, goal file paths are constrained to `.pi/goals/` and `.pi/goals/archi
 ## Recommended Workflow
 
 1. Start with a concrete objective: `/goal migrate auth tests to the new helper API`.
-2. Add budgets for long tasks: `--tokens 100k --max-turns 25`.
+2. Add budgets for long tasks when desired: `--tokens 100k`, optionally with a turn cap such as `--max-turns 25`.
 3. Use `/goal status` when you want to inspect progress.
 4. Use `/goal tweak ...` when you want to change direction without bypassing the agent.
 5. Use `/goal pause` before manual intervention or risky operations.
