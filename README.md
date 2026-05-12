@@ -13,7 +13,7 @@ The extension is designed around one rule: **the user owns intent; the agent exe
 - **Auto-continue loop**: confirmed goals can continue across turns until completion, pause, budget limit, abort, or user interruption.
 - **Schema gates**: unsafe lifecycle transitions are rejected by tool validators, not just prompts.
 - **Sisyphus as a light variant**: Sisyphus shares the normal lifecycle/tools and differs only in prompt style and completion standard.
-- **Pause/resume/clear lifecycle**: goals can be paused by the user, paused by the agent when blocked, resumed, or archived.
+- **Pause/resume/abort/clear lifecycle**: goals can be paused by the user, paused by the agent when blocked, resumed, completed from pause, aborted, or archived.
 - **Disk-backed state**: active and archived goals are stored under `.pi/goals/`.
 - **Lightweight built-in questionnaire tools**: `goal_question` and `goal_questionnaire` let the agent ask structured drafting questions without depending on another package.
 - **Above-editor status widget**: pi shows the current goal, status, budget, progress, and active file path while work is running.
@@ -52,7 +52,7 @@ Flow:
 2. The agent calls `propose_goal_draft` with a concrete objective after incorporating the answer.
 3. pi shows a full plain-text confirmation report.
 4. If confirmed, the full finalized goal is printed into the conversation and written to `.pi/goals/`.
-5. The agent works until it calls `update_goal(status="complete")`, pauses, hits a budget/cap, or the user interrupts.
+5. The agent works until it calls `update_goal(status="complete")`, pauses, aborts, hits a budget/cap, or the user interrupts.
 
 ### Sisyphus goal
 
@@ -71,6 +71,7 @@ Sisyphus mode is for patient ordered execution. It uses the same lifecycle and t
 /goal-tweak <change>    Draft a revision to the active/paused goal
 /goal-pause             Pause the active goal
 /goal-resume            Resume a paused goal
+/goal-abort             Abort/archive the current goal or cancel drafting
 /goal-clear             Archive the active goal or cancel drafting
 ```
 
@@ -87,8 +88,9 @@ The extension exposes tools only when they make sense for the current lifecycle 
 | `get_goal` | always | Read current goal state |
 | `propose_goal_draft` | goal drafting only | Submit a concrete draft for user confirmation |
 | `apply_goal_tweak` | tweak drafting only | Submit a revision to an existing goal |
-| `update_goal` | active goal | Mark the goal complete when all requirements are satisfied |
-| `pause_goal` | active goal | Pause because of a real blocker |
+| `update_goal` | active or paused goal | Mark the goal complete when all requirements are satisfied |
+| `pause_goal` | active/budget-limited goal | Pause because of a real blocker |
+| `abort_goal` | active, budget-limited, or paused goal | Abort/archive an obsolete, impossible, unsafe, or user-cancelled goal |
 | `step_complete` | hidden / legacy | Compatibility no-op; Sisyphus no longer requires a step counter |
 | `create_goal` | hidden | Internal compatibility path; normal creation goes through `propose_goal_draft` |
 
@@ -124,7 +126,7 @@ The completion result prints a full report into the conversation:
 - optional completion summary / evidence supplied by the agent
 - full current goal details, including objective, status, usage, budget, mode, and file path
 
-Sisyphus goals use the same completion tool as regular goals. The stricter part is the prompt/criteria standard: the agent should only complete after the whole ordered objective is actually satisfied.
+Sisyphus goals use the same completion tool as regular goals. The stricter part is the prompt/criteria standard: the agent should only complete after the whole ordered objective is actually satisfied. A paused goal can also be completed directly when the agent already has enough evidence that every requirement is satisfied; it does not need a resume just to call `update_goal`.
 
 ## Schema gates
 
@@ -136,8 +138,9 @@ The shipped gates are intentionally small and mechanical.
 | Focus consistency | `/goal-set` accidentally becoming Sisyphus, or `/goal-sisyphus` becoming regular mode |
 | Required drafting question | The agent directly agreeing to a goal without grilling the user on criteria or constraints |
 | Confirm-before-commit | The agent silently creating or replacing a goal |
-| Completion gate | Completing paused, stale, missing, or unfinished goals |
-| Post-stop block | Continuing to call tools after `pause_goal`, `update_goal`, or `apply_goal_tweak` stops the turn |
+| Completion gate | Completing stale, missing, or already completed goals; paused goals remain completable when evidence is sufficient |
+| Abort gate | Aborting missing, stale, completed, or reasonless goals |
+| Post-stop block | Continuing to call tools after `pause_goal`, `abort_goal`, `update_goal`, or `apply_goal_tweak` stops the turn |
 | Auto-continue cap | Runaway continuation chains |
 | Abort pause | Active goals staying active after user abort / Ctrl-C |
 | Post-compaction reminder | Losing the active objective after session compaction |
@@ -175,7 +178,7 @@ npm run check
 npm pack --dry-run
 ```
 
-The fast unit suite uses Node's built-in test runner and covers core parsing, drafting gates, lifecycle policy, questionnaire formatting, centralized tool names, Sisyphus prompt-style behavior, completion reporting, and display helpers.
+The fast unit suite uses Node's built-in test runner and covers core parsing, drafting gates, lifecycle policy, abort policy, questionnaire formatting, centralized tool names, Sisyphus prompt-style behavior, completion reporting, and display helpers.
 
 The experiment harness under `experiments/` runs full pi sessions against real model calls and mechanical rubrics.
 
@@ -204,7 +207,7 @@ extensions/widgets/goal-notifications.ts widget-style notification text
 
 ## Design principles
 
-- **User owns intent**: only the user starts, replaces, resumes, clears, or confirms goals.
+- **User owns intent**: only the user starts, replaces, resumes, clears, or confirms goals; the agent may only pause, complete, or abort through schema-gated lifecycle tools with evidence/reason.
 - **One commit path**: normal goal creation goes through drafting and confirmation.
 - **Schema beats prompt walls**: recurring failure modes are handled by validators and tool-call interceptors.
 - **Visible contracts**: confirmed goals and completion reports are printed fully into the conversation.

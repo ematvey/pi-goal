@@ -54,6 +54,8 @@ Keep this goal in force until it is actually achieved. Do not pause for confirma
 
 If you hit a real blocker that you cannot resolve with one more reasonable next step (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), the CORRECT action is to call pause_goal({reason, suggestedAction?}) with a structured, non-empty reason. pause_goal IS the channel for handing control back to the user — do not substitute a conversational "blocked, please help" summary in your final message and skip the tool call. Without pause_goal, the goal stays "active" and the UI cannot show the blocker. After pause_goal returns, you may add one short user-facing summary, but the tool call comes first.
 
+If the user explicitly asks to abandon/cancel this goal, or the objective is obsolete, impossible, or unsafe to continue and should not be marked complete, call abort_goal({reason}) with a non-empty reason and stop.
+
 Do NOT silently invent workarounds, fake completion, or quietly redefine the objective. Do NOT call update_goal=complete to escape a blocker.${sisyphusDisciplineBlock(goal) ? `\n${sisyphusDisciplineBlock(goal)}` : ""}`;
 }
 
@@ -86,7 +88,7 @@ export function continuationPrompt(goal: GoalRecord): string {
 		"Do not call update_goal unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.",
 		"Do not ask the user for confirmation unless there is a real blocker.",
 		"",
-		"If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), call pause_goal({reason, suggestedAction?}) and stop. Do not silently invent workarounds. Do not fake completion. pause_goal is the structured way to hand control back to the user; update_goal=complete is not an escape hatch for blockers.",
+		"If you hit a real blocker (missing credentials, contradictory spec, file/permission you cannot access, dangerous operation pending user approval, or an unclear Sisyphus-style ordered plan), call pause_goal({reason, suggestedAction?}) and stop. If the user explicitly asks to abandon/cancel, or the objective is obsolete, impossible, or unsafe to continue, call abort_goal({reason}) and stop. Do not silently invent workarounds. Do not fake completion. pause_goal and abort_goal are structured lifecycle exits; update_goal=complete is not an escape hatch for blockers.",
 		...(goal.sisyphus ? ["", sisyphusDisciplineBlock(goal)] : []),
 	].join("\n");
 }
@@ -104,7 +106,7 @@ export function budgetLimitPrompt(goal: GoalRecord): string {
 		"",
 		"The system has marked the goal as budget_limited, so do not start new substantive work for this goal. Wrap up this turn soon: summarize useful progress, identify remaining work or blockers, and leave the user with a clear next step.",
 		"",
-		"Do not call update_goal unless the goal is actually complete.",
+		"Do not call update_goal unless the goal is actually complete. If the user explicitly asks to abandon/cancel, or the objective is obsolete, impossible, or unsafe to continue, call abort_goal({reason}) instead of leaving it budget-limited.",
 	].join("\n");
 }
 

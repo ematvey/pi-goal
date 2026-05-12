@@ -23,6 +23,10 @@ export function isRunnableStatus(status: GoalStatusLike): boolean {
 	return status === "active" || status === "budgetLimited";
 }
 
+export function isCompletableStatus(status: GoalStatusLike): boolean {
+	return status === "active" || status === "budgetLimited" || status === "paused";
+}
+
 export function statusAfterBudgetLimit(goal: Pick<GoalPolicyRecordLike, "status" | "tokenBudget" | "usage">): GoalStatusLike {
 	if (goal.status === "active" && goal.tokenBudget !== null && goal.usage.tokensUsed >= goal.tokenBudget) {
 		return "budgetLimited";
@@ -42,7 +46,20 @@ export function validateGoalCompletion(args: {
 	const { goal, runningGoalId } = args;
 	if (!goal) return { ok: false, message: "No goal is set." };
 	if (runningGoalId && goal.id !== runningGoalId) return { ok: false, message: "The active goal changed during this run; not marking it complete." };
-	if (!isRunnableStatus(goal.status)) return { ok: false, message: `Goal is ${statusLabel(goal)}; ask the user to resume it before marking complete.` };
+	if (!isCompletableStatus(goal.status)) return { ok: false, message: `Goal is ${statusLabel(goal)}; update_goal does not apply.` };
+	return { ok: true };
+}
+
+export function validateGoalAbort(args: {
+	goal: GoalPolicyRecordLike | null;
+	runningGoalId?: string | null;
+	reason: string;
+}): PolicyValidation {
+	const { goal, runningGoalId } = args;
+	if (!goal) return { ok: false, message: "No goal is set; abort_goal is a no-op." };
+	if (runningGoalId && goal.id !== runningGoalId) return { ok: false, message: "The active goal changed during this run; not aborting." };
+	if (goal.status === "complete") return { ok: false, message: "Goal is complete; abort_goal does not apply." };
+	if (!args.reason.trim()) return { ok: false, message: "abort_goal requires a non-empty reason." };
 	return { ok: true };
 }
 
@@ -76,6 +93,21 @@ export function buildPausedByAgentGoal<T extends GoalPolicyRecordLike>(goal: T, 
 	};
 }
 
+export function buildAbortedByAgentGoal<T extends GoalPolicyRecordLike>(goal: T, args: {
+	reason: string;
+	updatedAt: string;
+}): T {
+	return {
+		...goal,
+		status: "paused",
+		autoContinue: false,
+		stopReason: "agent",
+		pauseReason: `Aborted: ${args.reason.trim()}`,
+		pauseSuggestedAction: undefined,
+		updatedAt: args.updatedAt,
+	};
+}
+
 export function validateResumeGoal(goal: GoalPolicyRecordLike | null): PolicyValidation {
 	if (!goal) return { ok: false, message: "No goal is set. Use /goal-set or /goal-sisyphus to start one." };
 	if (goal.status === "complete") return { ok: false, message: "Goal is complete. Use /goal-set to start a new one." };
@@ -88,6 +120,10 @@ export function validateResumeGoal(goal: GoalPolicyRecordLike | null): PolicyVal
 
 export function clearGoalCommandMessage(args: { archived: boolean; wasDrafting: boolean }): string {
 	return args.archived ? "Goal cleared and archived." : args.wasDrafting ? "Drafting cancelled." : "No goal is set.";
+}
+
+export function abortGoalCommandMessage(args: { archived: boolean; wasDrafting: boolean }): string {
+	return args.archived ? "Goal aborted and archived." : args.wasDrafting ? "Drafting cancelled." : "No goal is set.";
 }
 
 export function buildCompletionReport(args: { detailedSummary: string; completionSummary?: string | null }): string {

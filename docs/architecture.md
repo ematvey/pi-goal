@@ -20,7 +20,7 @@ Reusable logic is split into smaller modules:
 | `goal-record.ts` | Goal record types, creation, cloning, usage normalization, persisted-record migration |
 | `goal-core.ts` | Token-budget parsing, compact display formatting, status labels, objective title cleanup |
 | `goal-draft.ts` | Drafting prompts, plain-text draft confirmation report, draft proposal validation, drafting-stage tool gate |
-| `goal-policy.ts` | Lifecycle policy, pause/resume/complete validation, budget/compaction policy, full result reports |
+| `goal-policy.ts` | Lifecycle policy, abort/pause/resume/complete validation, budget/compaction policy, full result reports |
 | `goal-questionnaire.ts` | Built-in questionnaire types, normalization, answer formatting, TUI question runner, proposal confirmation dialog, question-tool registration |
 | `goal-tool-names.ts` | Published tool-name constants, active-tool lists, post-stop allowlist, goal work-tool list, question-like tool detection |
 | `prompts/goal-prompts.ts` | Active-goal, continuation, budget-limit, tweak-drafting, and stale-checkpoint prompt builders |
@@ -43,9 +43,15 @@ Reusable logic is split into smaller modules:
   ├─ active goal
   │    ├─ autoContinue queues checkpoint turns
   │    ├─ pause_goal pauses on real blockers
+  │    ├─ abort_goal aborts/archives obsolete or impossible goals
   │    └─ update_goal complete archives and prints full completion report
   │
-  └─ /goal-clear archives or cancels drafting
+  ├─ paused goal
+  │    ├─ /goal-resume restarts autoContinue
+  │    ├─ update_goal can complete from existing evidence
+  │    └─ abort_goal can archive without resuming
+  │
+  └─ /goal-clear or /goal-abort archives or cancels drafting
 ```
 
 ## Goal styles
@@ -84,7 +90,8 @@ Tool visibility is recomputed whenever state changes.
 
 - Drafting exposes `goal_question`, `goal_questionnaire`, `get_goal`, and `propose_goal_draft`.
 - Tweak drafting exposes question tools, `get_goal`, and `apply_goal_tweak`.
-- Active goals expose `get_goal`, `update_goal`, and `pause_goal`.
+- Active and budget-limited goals expose `get_goal`, `update_goal`, `pause_goal`, and `abort_goal`.
+- Paused goals expose `get_goal`, `update_goal`, and `abort_goal`, so the agent can complete or abandon a paused goal without resuming substantive work.
 - `step_complete` is hidden legacy compatibility.
 - `create_goal` remains hidden in normal user flows.
 
@@ -112,7 +119,8 @@ When `autoContinue` is on, the extension queues continuation prompts after agent
 
 - the agent calls `update_goal(status="complete")`;
 - the agent calls `pause_goal`;
-- the user invokes `/goal-pause` or `/goal-clear`;
+- the agent calls `abort_goal`;
+- the user invokes `/goal-pause`, `/goal-clear`, or `/goal-abort`;
 - the user aborts the turn;
 - the token budget is exhausted;
 - `PI_GOAL_MAX_AUTOCONTINUE_TURNS` is reached;
@@ -122,7 +130,7 @@ Continuation prompts include a goal id so stale prompts can be detected and neut
 
 ## Completion output
 
-Completion is intentionally verbose in the tool result. The user sees:
+Completion is intentionally verbose in the tool result. `update_goal(status="complete")` is valid for active, budget-limited, and paused goals; paused goals do not need to be resumed just to record completion when existing evidence is sufficient. The user sees:
 
 - a `Goal complete.` header;
 - the agent's optional completion summary/evidence;
@@ -146,7 +154,7 @@ They cover:
 - drafting prompt and drafting gates;
 - questionnaire normalization and answer formatting;
 - tool-name constants and question-like detection;
-- lifecycle policy;
+- lifecycle policy, including abort and paused-goal completion;
 - Sisyphus prompt-style behavior;
 - budget and auto-continue cap behavior;
 - full creation/completion report formatting.

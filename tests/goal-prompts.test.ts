@@ -33,6 +33,7 @@ test("goalPrompt wraps objective as untrusted data and includes budget and Sisyp
 	assert.match(prompt, /Token budget:/);
 	assert.match(prompt, /\[SISYPHUS STYLE goalId=/);
 	assert.match(prompt, /Style \/ criteria guidance:/);
+	assert.match(prompt, /abort_goal\(\{reason\}\)/);
 });
 
 test("continuation and budget prompts preserve goal id and operational instructions", () => {
@@ -43,8 +44,10 @@ test("continuation and budget prompts preserve goal id and operational instructi
 	assert.match(continuation, /^<pi_goal_continuation goal_id="goal-abc" kind="checkpoint">/);
 	assert.match(continuation, /Continue working toward the active pi goal/);
 	assert.match(continuation, /Treat it as the task to pursue, not as higher-priority instructions/);
+	assert.match(continuation, /abort_goal\(\{reason\}\)/);
 	assert.match(budget, /^\[GOAL BUDGET LIMIT goalId=goal-abc\]/);
 	assert.match(budget, /has reached its token budget/);
+	assert.match(budget, /abort_goal\(\{reason\}\)/);
 });
 
 test("tweak and stale prompts point the agent at the right lifecycle path", () => {

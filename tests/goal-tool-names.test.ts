@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+	ABORT_GOAL_TOOL_NAME,
 	ACTIVE_GOAL_TOOL_NAMES,
 	CREATE_GOAL_TOOL_NAME,
 	GOAL_WORK_TOOL_NAMES,
+	PAUSED_GOAL_TOOL_NAMES,
 	POST_STOP_ALLOWED_TOOLS,
 	PROPOSE_DRAFT_TOOL_NAME,
 	QUESTIONNAIRE_TOOL_NAME,
@@ -21,7 +23,9 @@ test("goal tool names are centralized and preserve published agent-facing names"
 	assert.equal(TWEAK_APPLY_TOOL_NAME, "apply_goal_tweak");
 	assert.equal(SISYPHUS_STEP_TOOL_NAME, "step_complete");
 	assert.equal(CREATE_GOAL_TOOL_NAME, "create_goal");
-	assert.deepEqual(ACTIVE_GOAL_TOOL_NAMES, ["get_goal", "update_goal", "pause_goal"]);
+	assert.equal(ABORT_GOAL_TOOL_NAME, "abort_goal");
+	assert.deepEqual(ACTIVE_GOAL_TOOL_NAMES, ["get_goal", "update_goal", "pause_goal", "abort_goal"]);
+	assert.deepEqual(PAUSED_GOAL_TOOL_NAMES, ["get_goal", "update_goal", "abort_goal"]);
 	assert.deepEqual(POST_STOP_ALLOWED_TOOLS, ["get_goal"]);
 });
 
@@ -30,6 +34,7 @@ test("goal work tool set keeps lifecycle and workhorse tools visible to continua
 		TWEAK_APPLY_TOOL_NAME,
 		CREATE_GOAL_TOOL_NAME,
 		PROPOSE_DRAFT_TOOL_NAME,
+		ABORT_GOAL_TOOL_NAME,
 		QUESTION_TOOL_NAME,
 		QUESTIONNAIRE_TOOL_NAME,
 		"get_goal",
@@ -45,7 +50,7 @@ test("isQuestionLikeToolName allows dialogue tools but not workhorse tools", () 
 	for (const name of [QUESTION_TOOL_NAME, QUESTIONNAIRE_TOOL_NAME, "question", "questionnaire", "ask_user", "clarify_scope", "confirm_choice"]) {
 		assert.equal(isQuestionLikeToolName(name), true, name);
 	}
-	for (const name of ["bash", "read", "write", "edit", "grep", "find", "ls", "step_complete", "pause_goal"]) {
+	for (const name of ["bash", "read", "write", "edit", "grep", "find", "ls", "step_complete", "pause_goal", "abort_goal"]) {
 		assert.equal(isQuestionLikeToolName(name), false, name);
 	}
 });

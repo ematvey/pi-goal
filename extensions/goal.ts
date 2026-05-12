@@ -24,6 +24,7 @@ import {
 	showProposalDialog,
 } from "./goal-questionnaire.ts";
 import {
+	ABORT_GOAL_TOOL_NAME,
 	ACTIVE_GOAL_TOOL_NAMES,
 	CREATE_GOAL_TOOL_NAME,
 	POST_STOP_ALLOWED_TOOLS,
@@ -32,6 +33,7 @@ import {
 	QUESTION_TOOL_NAME,
 	SISYPHUS_STEP_TOOL_NAME,
 	GOAL_WORK_TOOL_NAMES,
+	PAUSED_GOAL_TOOL_NAMES,
 	TWEAK_APPLY_TOOL_NAME,
 	isQuestionLikeToolName,
 } from "./goal-tool-names.ts";
@@ -70,6 +72,8 @@ import { buildGoalRunningNotification } from "./widgets/goal-notifications.ts";
 import { GoalWidgetComponent } from "./widgets/goal-widget.ts";
 
 import {
+	abortGoalCommandMessage,
+	buildAbortedByAgentGoal,
 	buildAutoContinueCapPause,
 	buildCompletionReport,
 	buildGoalCreatedReport,
@@ -79,6 +83,7 @@ import {
 	shouldAutoPauseForContinueCap,
 	shouldInjectPostCompactReminder,
 	statusAfterBudgetLimit,
+	validateGoalAbort,
 	validateGoalCompletion,
 	validatePauseGoal,
 	validateResumeGoal,
@@ -112,9 +117,9 @@ const GOAL_WORK_TOOL_SET = new Set<string>(GOAL_WORK_TOOL_NAMES);
 
 
 /**
- * Tools that are NEVER blocked by the post-stop in-turn block. After pause_goal
- * / update_goal=complete / apply_goal_tweak fires, the agent should yield the
- * turn; we block all subsequent tool calls except these read-only inspections.
+ * Tools that are NEVER blocked by the post-stop in-turn block. After pause_goal,
+ * abort_goal, update_goal=complete, or apply_goal_tweak fires, the agent should
+ * yield the turn; we block all subsequent tool calls except these read-only inspections.
  */
 const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
 
@@ -210,7 +215,7 @@ function renderGoalResult(result: { details?: unknown; content: Array<{ type: st
 	if (!details || typeof details !== "object" || !("goal" in details)) {
 		return new Text(firstText, 0, 0);
 	}
-	if (firstText.startsWith("Goal complete.") || firstText.startsWith("Goal paused.") || firstText.startsWith("Goal confirmed and created.")) {
+	if (firstText.startsWith("Goal complete.") || firstText.startsWith("Goal paused.") || firstText.startsWith("Goal aborted.") || firstText.startsWith("Goal confirmed and created.")) {
 		return new Text(firstText, 0, 0);
 	}
 	return new Text(theme.fg("accent", "Goal ") + theme.fg("muted", oneLineSummary(details.goal)), 0, 0);
@@ -366,10 +371,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			active.add(QUESTION_TOOL_NAME);
 			active.add(QUESTIONNAIRE_TOOL_NAME);
 			const goalRunning = goal?.status === "active" || goal?.status === "budgetLimited";
-			for (const name of ACTIVE_GOAL_TOOL_NAMES) {
-				if (goalRunning) active.add(name);
-				else active.delete(name);
-			}
+			const goalPaused = goal?.status === "paused";
+			for (const name of ACTIVE_GOAL_TOOL_NAMES) active.delete(name);
+			const lifecycleTools = goalRunning ? ACTIVE_GOAL_TOOL_NAMES : goalPaused ? PAUSED_GOAL_TOOL_NAMES : [];
+			for (const name of lifecycleTools) active.add(name);
 			// Sisyphus is now a prompt/criteria style, not a separate step-counter
 			// mechanism. Keep step_complete registered for legacy transcripts, but do
 			// not expose it as an active work tool.
@@ -963,6 +968,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify(msg, didArchive || wasDrafting ? "info" : "warning");
 	}
 
+	async function handleGoalAbort(ctx: ExtensionContext): Promise<void> {
+		const archived = archiveCurrentGoal(ctx, "user");
+		const didArchive = !!archived;
+		setGoal(null, ctx);
+		const wasDrafting = draftingFor !== null;
+		draftingFor = null;
+		syncGoalTools();
+		const msg = abortGoalCommandMessage({ archived: didArchive, wasDrafting });
+		ctx.ui.notify(msg, didArchive || wasDrafting ? "info" : "warning");
+	}
+
 	pi.registerMessageRenderer<GoalEventDetails>(GOAL_EVENT_ENTRY, renderGoalEvent);
 
 	// /goal and /goal-status: read-only status display.
@@ -973,7 +989,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		},
 	};
 	pi.registerCommand("goal", {
-		description: "Show goal status. Manage goals with /goal-set, /goal-sisyphus, /goal-tweak, /goal-replace, /goal-clear, /goal-pause, /goal-resume.",
+		description: "Show goal status. Manage goals with /goal-set, /goal-sisyphus, /goal-tweak, /goal-replace, /goal-clear, /goal-abort, /goal-pause, /goal-resume.",
 		handler: statusCommand.handler,
 	});
 	pi.registerCommand("goal-status", statusCommand);
@@ -1015,6 +1031,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		description: "Archive the current goal.",
 		handler: async (_rawArgs, ctx) => {
 			await handleGoalClear(ctx);
+		},
+	});
+
+	// /goal-abort: abandon and archive the current goal, or cancel drafting.
+	pi.registerCommand("goal-abort", {
+		description: "Abort the current goal and archive it, or cancel an in-progress drafting flow.",
+		handler: async (_rawArgs, ctx) => {
+			await handleGoalAbort(ctx);
 		},
 	});
 
@@ -1223,8 +1247,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	pi.registerTool(defineTool({
 		name: "update_goal",
 		label: "Update Goal",
-		description: "Mark the current active pi goal complete when the objective is actually achieved.",
-		promptSnippet: "Mark the active pi goal complete when the objective is achieved.",
+		description: "Mark the current active or paused pi goal complete when the objective is actually achieved.",
+		promptSnippet: "Mark the active or paused pi goal complete when the objective is achieved.",
 		promptGuidelines: [
 			"Use update_goal with status=complete only when the pi goal objective has actually been achieved and no required work remains.",
 			"Before calling update_goal, map every explicit requirement in the objective to concrete evidence from files, command output, test results, PR state, or other real artifacts; uncertainty means the goal is not complete.",
@@ -1329,6 +1353,64 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		},
 		renderCall(args, theme) {
 			return new Text(theme.fg("toolTitle", "pause_goal ") + theme.fg("warning", truncateText(args?.reason ?? "", 80)), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			return renderGoalResult(result, theme);
+		},
+	}));
+
+	pi.registerTool(defineTool({
+		name: ABORT_GOAL_TOOL_NAME,
+		label: "Abort Goal",
+		description: "Abort the current active, budget-limited, or paused pi goal and archive it without marking it complete.",
+		promptSnippet: "Abort the current pi goal only when the user asks to abandon it or the objective is obsolete/impossible.",
+		promptGuidelines: [
+			"Use abort_goal only when the user explicitly asks to abandon/cancel the current goal, or when the goal is impossible, obsolete, or unsafe to continue and should not be marked complete.",
+			"Do not use abort_goal as a substitute for update_goal(status=complete). If the objective is achieved, complete it instead.",
+			"Do not use abort_goal for ordinary blockers that the user can resolve; use pause_goal({reason, suggestedAction?}) for that case.",
+			"Always pass a concrete one-sentence reason. After abort_goal returns, stop and do not call other tools in the same turn.",
+		],
+		parameters: Type.Object({
+			reason: Type.String({ description: "One-sentence reason for abandoning the current goal. Plain language, not an apology." }),
+		}),
+		executionMode: "sequential",
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const reason = params.reason.trim();
+			if (!reason) throw new Error("abort_goal requires a non-empty reason.");
+			const abortGate = validateGoalAbort({ goal, runningGoalId, reason });
+			if (!abortGate.ok) {
+				return {
+					content: [{ type: "text", text: abortGate.message }],
+					details: goalDetails(goal),
+				};
+			}
+			if (!goal) throw new Error("Goal disappeared during abort validation.");
+			const abortedGoalId = goal.id;
+
+			// Account for any remaining elapsed time before abandoning the run.
+			accountProgress(ctx, { allowBudgetSteering: false, accountBudgetLimited: true });
+			goal = mergeGoalPromptFromDisk(ctx, goal);
+			goal = buildAbortedByAgentGoal(goal, { reason, updatedAt: nowIso() });
+			const archived = archiveCurrentGoal(ctx, "agent");
+			setGoal(null, ctx);
+			turnStoppedFor = abortedGoalId;
+
+			const archiveLine = archived?.archivedPath ? `\nArchive: ${archived.archivedPath}` : "";
+			ctx.ui.notify(
+				`Goal aborted by agent.\nReason: ${truncateText(reason, 200)}${archiveLine}`,
+				"warning",
+			);
+			return {
+				content: [{
+					type: "text",
+					text: `Goal aborted. Reason: ${reason}${archiveLine}\nThe goal has been archived and cleared. Stop now; do not start another tool call.`,
+				}],
+				details: goalDetails(goal),
+				terminate: true,
+			};
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", "abort_goal ") + theme.fg("warning", truncateText(args?.reason ?? "", 80)), 0, 0);
 		},
 		renderResult(result, _options, theme) {
 			return renderGoalResult(result, theme);
@@ -1505,8 +1587,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 	// #4 + C9 fix + Phase 5 C3: gate in-turn tool calls based on lifecycle state.
 	pi.on("tool_call", async (event) => {
-		// Post-stop in-turn block (C9 0ad8 fix): after pause_goal / update_goal=complete /
-		// apply_goal_tweak fires in this turn, block all subsequent tool calls except
+		// Post-stop in-turn block (C9 0ad8 fix): after pause_goal / abort_goal /
+		// update_goal=complete / apply_goal_tweak fires in this turn, block all subsequent tool calls except
 		// read-only inspection. Forces the agent to yield the turn instead of "fixing"
 		// the situation by creating extra files etc.
 		if (turnStoppedFor !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
@@ -1652,7 +1734,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				if (goal.pauseSuggestedAction) pauseExtras.push(`You suggested: ${goal.pauseSuggestedAction}`);
 			}
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n[PI GOAL PAUSED goalId=${goal.id}]\n${untrustedObjectiveBlock(goal)}${pauseExtras.join("\n")}\n\nThe goal is paused. Do not autonomously continue it unless the user resumes it with /goal-resume. Do not call pause_goal again.`,
+				systemPrompt: `${event.systemPrompt}\n\n[PI GOAL PAUSED goalId=${goal.id}]\n${untrustedObjectiveBlock(goal)}${pauseExtras.join("\n")}\n\nThe goal is paused. Do not autonomously continue substantive work unless the user resumes it with /goal-resume. If the user explicitly asks to finish or abandon the paused goal, or the objective is already satisfied based on available evidence, you may call update_goal(status=complete) or abort_goal without resuming. Do not call pause_goal again.`,
 			};
 		}
 		if (goal.status === "budgetLimited") {

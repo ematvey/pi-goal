@@ -22,6 +22,8 @@ The fast local suite uses Node's built-in `node:test` runner and currently cover
 - `tests/goal-record.test.ts`
 - `tests/goal-files.test.ts`
 - `tests/goal-prompts.test.ts`
+- `tests/goal-notifications.test.ts`
+- `tests/goal-widget.test.ts`
 
 ## Extracted modules
 
@@ -32,9 +34,9 @@ The fast local suite uses Node's built-in `node:test` runner and currently cover
 | `extensions/goal-record.ts` | Goal creation, normalization/migration, usage cloning, persisted record shape |
 | `extensions/goal-core.ts` | Token budget parsing, compact duration/token/status display, objective-title cleanup |
 | `extensions/goal-draft.ts` | Drafting prompt, draft summary, safe objective escaping, B0 required-question gate, B1 focus gate, Sisyphus prompt-style guidance, drafting tool gate |
-| `extensions/goal-policy.ts` | Creation/completion/pause/resume/clear policy, auto-continue cap, budget transition, compaction reminder, full creation/completion reports |
+| `extensions/goal-policy.ts` | Creation/completion-from-active-or-paused, abort/pause/resume/clear policy, auto-continue cap, budget transition, compaction reminder, full creation/completion reports |
 | `extensions/goal-questionnaire.ts` | Question normalization, duplicate id handling, option filtering, recommended-index validation, answer formatting, confirm/cancel mapping, `goal_question` and `goal_questionnaire` registration |
-| `extensions/goal-tool-names.ts` | Published tool constants, active-tool list, goal work-tool list, post-stop allowlist, question-like tool detection |
+| `extensions/goal-tool-names.ts` | Published tool constants, active/paused tool lists, goal work-tool list, post-stop allowlist, question-like tool detection |
 | `extensions/prompts/goal-prompts.ts` | Active-goal, continuation, budget-limit, tweak-drafting, and stale-checkpoint prompt text |
 | `extensions/storage/goal-files.ts` | Safe goal paths, serialize/parse round trip, prompt-body disk edits, active/archive writes |
 | `extensions/widgets/goal-widget.ts` | Goal Beacon rendering, Sisyphus style label, budget/status/path lines, blocker/suggested-action display |
@@ -44,7 +46,7 @@ The fast local suite uses Node's built-in `node:test` runner and currently cover
 
 1. Add or update tests before moving behavior.
 2. Extract pure helpers or narrow adapter boundaries first.
-3. Keep published tool names, slash commands, file formats, and UI semantics stable.
+3. Keep published tool names, slash commands, file formats, and UI semantics stable unless the user explicitly asks for a new public affordance such as `/goal-abort` or `abort_goal`.
 4. Run `npm test` and `npm run check` after each slice.
 5. Run `npm pack --dry-run` before release or packaging changes.
 

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+	abortGoalCommandMessage,
+	buildAbortedByAgentGoal,
 	buildAutoContinueCapPause,
 	buildCompletionReport,
 	buildGoalCreatedReport,
@@ -13,6 +15,7 @@ import {
 	shouldInjectPostCompactReminder,
 	shouldQueueContinuation,
 	statusAfterBudgetLimit,
+	validateGoalAbort,
 	validateGoalCompletion,
 	validateGoalCreationSlot,
 	validatePauseGoal,
@@ -64,9 +67,8 @@ test("goal lifecycle creation and completion gates reject unsafe transitions", (
 	assert.equal(stale.ok, false);
 	if (!stale.ok) assert.match(stale.message, /changed during this run/);
 
-	const paused = validateGoalCompletion({ goal: goal({ status: "paused", autoContinue: false }) });
-	assert.equal(paused.ok, false);
-	if (!paused.ok) assert.match(paused.message, /ask the user to resume/);
+	assert.deepEqual(validateGoalCompletion({ goal: goal({ status: "paused", autoContinue: false }) }), { ok: true });
+	assert.match(rejectedMessage(validateGoalCompletion({ goal: goal({ status: "complete", autoContinue: false }) })), /complete/);
 
 	assert.deepEqual(validateGoalCompletion({ goal: sisyphus() }), { ok: true });
 });
@@ -110,6 +112,29 @@ test("pause, resume, and clear policy preserve human-owned lifecycle affordances
 		buildGoalCreatedReport({ objective: "# Objective\nShip the feature.", detailedSummary: "Status: active" }),
 		"Goal confirmed and created.\n\nFinalized goal:\n\n# Objective\nShip the feature.\n\nGoal details:\nStatus: active",
 	);
+});
+
+test("abort policy supports agent-owned abandonment without a new lifecycle state", () => {
+	assert.match(rejectedMessage(validateGoalAbort({ goal: null, reason: "obsolete" })), /no-op/);
+	assert.match(rejectedMessage(validateGoalAbort({ goal: goal({ id: "new" }), runningGoalId: "old", reason: "obsolete" })), /changed during this run/);
+	assert.match(rejectedMessage(validateGoalAbort({ goal: goal({ status: "complete" }), reason: "obsolete" })), /does not apply/);
+	assert.match(rejectedMessage(validateGoalAbort({ goal: goal(), reason: "   " })), /requires a non-empty reason/);
+	assert.deepEqual(validateGoalAbort({ goal: goal({ status: "paused", autoContinue: false }), reason: "Obsolete objective" }), { ok: true });
+	assert.deepEqual(validateGoalAbort({ goal: goal({ status: "budgetLimited" }), reason: "Obsolete objective" }), { ok: true });
+
+	const aborted = buildAbortedByAgentGoal(goal(), {
+		reason: "User replaced the work with a different request",
+		updatedAt: "2026-05-12T03:00:00.000Z",
+	});
+	assert.equal(aborted.status, "paused");
+	assert.equal(aborted.autoContinue, false);
+	assert.equal(aborted.stopReason, "agent");
+	assert.equal(aborted.pauseReason, "Aborted: User replaced the work with a different request");
+	assert.equal(aborted.pauseSuggestedAction, undefined);
+
+	assert.equal(abortGoalCommandMessage({ archived: true, wasDrafting: false }), "Goal aborted and archived.");
+	assert.equal(abortGoalCommandMessage({ archived: false, wasDrafting: true }), "Drafting cancelled.");
+	assert.equal(abortGoalCommandMessage({ archived: false, wasDrafting: false }), "No goal is set.");
 });
 
 test("budget, autoContinue cap, and compaction policies are deterministic", () => {
