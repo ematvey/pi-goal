@@ -202,15 +202,6 @@ test("reconstructGoalLedger handles empty events", () => {
   assert.equal(state.terminalGoals.size, 0);
 });
 
-test("reconstructGoalLedger preserves budgetLimited status in goal_paused", () => {
-  const events: GoalLedgerEvent[] = [
-    { type: "goal_created", goalId: "g1", objective: "o1", sisyphus: false, autoContinue: true, at: "2024-01-01T00:00:00.000Z" },
-    { type: "goal_paused", goalId: "g1", reason: "budget", status: "budgetLimited", at: "2024-01-01T00:00:01.000Z" },
-  ];
-  const state = reconstructGoalLedger(events);
-  assert.equal(state.goals.get("g1")?.latestStatus, "budgetLimited");
-});
-
 test("reconstructGoalLedger defaults missing status to paused in goal_paused", () => {
   const events: GoalLedgerEvent[] = [
     { type: "goal_created", goalId: "g1", objective: "o1", sisyphus: false, autoContinue: true, at: "2024-01-01T00:00:00.000Z" },
@@ -237,9 +228,9 @@ test("appendGoalEvent persists goal_paused with status field", () => {
   appendGoalEvent(ctx, {
     type: "goal_paused",
     goalId: "g1",
-    reason: "budget",
-    status: "budgetLimited",
-    suggestedAction: "Raise budget",
+    reason: "user",
+    status: "paused",
+    suggestedAction: "Check credentials",
     at: "2024-01-01T00:00:00.000Z",
   });
 
@@ -247,18 +238,18 @@ test("appendGoalEvent persists goal_paused with status field", () => {
   assert.equal(result.events.length, 1);
   const evt = result.events[0] as { type: string; status?: string; reason: string };
   assert.equal(evt.type, "goal_paused");
-  assert.equal(evt.status, "budgetLimited");
-  assert.equal(evt.reason, "budget");
+  assert.equal(evt.status, "paused");
+  assert.equal(evt.reason, "user");
   cleanup(ctx);
 });
 
-test("reconstructGoalLedger handles legacy auto-continue cap pause events", () => {
+test("reconstructGoalLedger handles repeated pause and resume events", () => {
   const events: GoalLedgerEvent[] = [
     { type: "goal_created", goalId: "g1", objective: "o1", sisyphus: false, autoContinue: true, at: "2024-01-01T00:00:00.000Z" },
     { type: "goal_focused", goalId: "g1", reason: "created", at: "2024-01-01T00:00:01.000Z" },
-    { type: "goal_paused", goalId: "g1", reason: "budget", status: "budgetLimited", at: "2024-01-01T00:00:02.000Z" },
+    { type: "goal_paused", goalId: "g1", reason: "user", status: "paused", at: "2024-01-01T00:00:02.000Z" },
     { type: "goal_resumed", goalId: "g1", reason: "user", at: "2024-01-01T00:00:03.000Z" },
-    { type: "goal_paused", goalId: "g1", reason: "auto_continue_cap", at: "2024-01-01T00:00:04.000Z" },
+    { type: "goal_paused", goalId: "g1", reason: "user", at: "2024-01-01T00:00:04.000Z" },
     { type: "goal_resumed", goalId: "g1", reason: "user", at: "2024-01-01T00:00:05.000Z" },
     { type: "goal_completed", goalId: "g1", at: "2024-01-01T00:00:06.000Z" },
   ];
@@ -271,6 +262,6 @@ test("reconstructGoalLedger handles legacy auto-continue cap pause events", () =
   assert.ok(g1);
   assert.equal(g1?.latestStatus, "complete");
   assert.equal(g1?.completedAt, "2024-01-01T00:00:06.000Z");
-  // Legacy auto-continue cap event compatibility: goal_resumed clears pauseReason, so latestPauseReason should be undefined
+  // goal_resumed clears pauseReason, so latestPauseReason should be undefined
   assert.equal(g1?.latestPauseReason, undefined);
 });

@@ -30,7 +30,6 @@ test("serializeGoalFile and parseGoalFile round-trip metadata while allowing pro
 		const goal = createGoal({
 			objective: "=== Goal ===\nObjective: original",
 			autoContinue: true,
-			tokenBudget: null,
 			sisyphus: false,
 		}, Date.UTC(2026, 0, 2, 3, 4, 5));
 		const filePath = path.join(ctx.cwd, "goal.md");
@@ -56,7 +55,6 @@ test("goal file paths stay under active and archive roots even with unsafe metad
 		const goal = createGoal({
 			objective: "Persist safely",
 			autoContinue: true,
-			tokenBudget: null,
 			sisyphus: true,
 		}, Date.UTC(2026, 0, 2, 3, 4, 5));
 		const unsafe = { ...goal, activePath: "../escape.md", archivedPath: ".pi/goals/not-archive.md" };
@@ -83,11 +81,11 @@ test("readActiveGoalFiles scans deterministic safe active goal files only", () =
 	try {
 		mkdirSync(path.join(ctx.cwd, ".pi/goals"), { recursive: true });
 		const first = writeActiveGoalFile(ctx, {
-			...createGoal({ objective: "First", autoContinue: true, tokenBudget: null, sisyphus: false }, Date.UTC(2026, 0, 2, 3, 4, 5)),
+			...createGoal({ objective: "First", autoContinue: true, sisyphus: false }, Date.UTC(2026, 0, 2, 3, 4, 5)),
 			id: "b-goal",
 		});
 		const second = writeActiveGoalFile(ctx, {
-			...createGoal({ objective: "Second", autoContinue: true, tokenBudget: null, sisyphus: true }, Date.UTC(2026, 0, 1, 3, 4, 5)),
+			...createGoal({ objective: "Second", autoContinue: true, sisyphus: true }, Date.UTC(2026, 0, 1, 3, 4, 5)),
 			id: "a-goal",
 		});
 		writeFileSync(path.join(ctx.cwd, ".pi/goals", "active_goal_invalid.md"), "not json", "utf8");

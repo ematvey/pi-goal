@@ -1,7 +1,6 @@
 import {
 	displayObjectiveTitle,
 	formatDuration,
-	formatTokenBudget,
 	formatTokenValue,
 	statusLabel,
 	truncateText,
@@ -74,7 +73,7 @@ export function buildGoalListText(pool: Map<string, GoalRecord>, focusedGoalId: 
 		const usage = goal.usage.tokensUsed > 0 || goal.usage.activeSeconds > 0
 			? ` · ${formatDuration(goal.usage.activeSeconds)} · ${formatTokenValue(goal.usage.tokensUsed).split(" ")[0]}`
 			: "";
-		lines.push(`${focused} ${goal.id} — ${statusLabel(goal)} · ${mode} · budget ${formatTokenBudget(goal)}${usage}`);
+		lines.push(`${focused} ${goal.id} — ${statusLabel(goal)} · ${mode}${usage}`);
 		lines.push(`  ${displayObjectiveTitle(goal.objective)}`);
 		if (goal.activePath) lines.push(`  ${goal.activePath}`);
 	}

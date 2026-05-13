@@ -45,14 +45,14 @@ export const GOAL_PROGRESS_TOOL_NAMES = [
 
 export const POST_STOP_ALLOWED_TOOLS = ["get_goal"] as const;
 
-export type GoalToolStatus = "active" | "paused" | "budgetLimited" | "complete" | null | undefined;
+export type GoalToolStatus = "active" | "paused" | "complete" | null | undefined;
 
 
 export type GoalToolPhase = "normal" | "drafting" | "tweakDrafting";
 
 export function lifecycleToolNamesForGoalStatus(status: GoalToolStatus, phase: GoalToolPhase = "normal"): readonly string[] {
 	if (phase === "drafting" || phase === "tweakDrafting") return NO_FOCUSED_GOAL_TOOL_NAMES;
-	if (status === "active" || status === "budgetLimited") return ACTIVE_GOAL_TOOL_NAMES;
+	if (status === "active") return ACTIVE_GOAL_TOOL_NAMES;
 	if (status === "paused") return PAUSED_GOAL_TOOL_NAMES;
 	return NO_FOCUSED_GOAL_TOOL_NAMES;
 }

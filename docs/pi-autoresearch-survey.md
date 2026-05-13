@@ -15,7 +15,6 @@ This document records external patterns that are actually implemented in `pi-goa
 
 `pi-goal` uses several autonomous-loop safety patterns inspired by `pi-autoresearch`:
 
-- **Auto-continue cap**: `PI_GOAL_MAX_AUTOCONTINUE_TURNS` prevents runaway continuation chains.
 - **Empty-turn gate**: auto-continue does not advance when the agent did no meaningful goal-work tool activity.
 - **Post-compaction reminder**: after compaction, the next agent turn is reminded to re-read the objective and continue from actual artifacts/state.
 

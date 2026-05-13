@@ -1,6 +1,6 @@
-export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
+export type GoalStatus = "active" | "paused" | "complete";
 export type StopReason = "user" | "agent";
-export type GoalEventKind = "checkpoint" | "stale" | "budget_limit" | "drafting";
+export type GoalEventKind = "checkpoint" | "stale" | "drafting";
 export type DraftingFocus = "goal" | "sisyphus";
 export type GoalFocusReason = "created" | "selected" | "resumed" | "completed" | "cleared" | "aborted" | "migrated";
 
@@ -14,7 +14,6 @@ export interface GoalRecord {
 	objective: string;
 	status: GoalStatus;
 	autoContinue: boolean;
-	tokenBudget: number | null;
 	usage: GoalUsage;
 	sisyphus: boolean;
 	createdAt: string;
@@ -52,7 +51,6 @@ export interface GoalEventDetails {
 export interface GoalCreationConfig {
 	objective: string;
 	autoContinue: boolean;
-	tokenBudget: number | null;
 	sisyphus: boolean;
 }
 
@@ -123,7 +121,6 @@ export function createGoal(config: GoalCreationConfig, now = Date.now()): GoalRe
 		objective: config.objective,
 		status: "active",
 		autoContinue: config.autoContinue,
-		tokenBudget: config.tokenBudget,
 		usage: emptyUsage(),
 		sisyphus: config.sisyphus,
 		createdAt: timestamp,
@@ -147,30 +144,13 @@ export function normalizeGoalRecord(value: unknown): GoalRecord | null {
 
 	const timestamp = nowIso();
 	const rawStatus = raw.status;
-	let status: GoalStatus =
-		rawStatus === "complete"
-			? "complete"
-			: rawStatus === "paused"
-				? "paused"
-				: rawStatus === "budgetLimited" || rawStatus === "budget_limited"
-					? "budgetLimited"
-					: "active";
+	let status: GoalStatus = rawStatus === "complete" ? "complete" : rawStatus === "paused" ? "paused" : "active";
 	const autoContinue = typeof raw.autoContinue === "boolean" ? raw.autoContinue : true;
-	const tokenBudget =
-		raw.tokenBudget === null
-			? null
-			: typeof raw.tokenBudget === "number" && Number.isFinite(raw.tokenBudget) && raw.tokenBudget > 0
-				? Math.floor(raw.tokenBudget)
-				: null;
 	const usage = normalizeUsage(raw.usage);
 	const sisyphus = raw.sisyphus === true;
 
-	// Treat paused-but-auto as active (legacy migration) but keep budgetLimited if still over budget.
-	if (status === "paused" && autoContinue && (tokenBudget === null || usage.tokensUsed < tokenBudget)) {
+	if (status === "paused" && autoContinue) {
 		status = "active";
-	}
-	if (status === "active" && tokenBudget !== null && usage.tokensUsed >= tokenBudget) {
-		status = "budgetLimited";
 	}
 
 	return {
@@ -178,7 +158,6 @@ export function normalizeGoalRecord(value: unknown): GoalRecord | null {
 		objective,
 		status,
 		autoContinue,
-		tokenBudget,
 		usage,
 		sisyphus,
 		createdAt: typeof raw.createdAt === "string" ? raw.createdAt : timestamp,

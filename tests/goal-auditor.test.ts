@@ -20,7 +20,6 @@ function goal(overrides: Partial<GoalRecord> = {}): GoalRecord {
 		objective: "Write a complete tutorial, not just a scaffold.",
 		status: "active",
 		autoContinue: true,
-		tokenBudget: null,
 		usage: { tokensUsed: 0, activeSeconds: 0 },
 		sisyphus: false,
 		createdAt: "2026-05-12T00:00:00.000Z",

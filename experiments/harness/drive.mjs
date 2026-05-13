@@ -52,8 +52,8 @@ mkdirSync(sandboxDir, { recursive: true });
 mkdirSync(sessionDir, { recursive: true });
 
 // Per-case env overrides via <case-dir>/env.json. Loaded BEFORE the extension
-// is imported so module-load-time env reads (e.g. PI_GOAL_MAX_AUTOCONTINUE_TURNS)
-// pick them up. Use this to tweak extension constants at test time.
+// is imported so module-load-time env reads pick them up. Use this to tweak
+// extension constants at test time.
 try {
 	const envPath = join(caseDir, "env.json");
 	const raw = readFileSync(envPath, "utf8");

@@ -14,7 +14,6 @@ function goal(overrides: Partial<GoalWidgetRecord> = {}): GoalWidgetRecord {
 		objective: "=== Goal ===\nObjective: Componentize the goal widget\nSuccess criteria: tests pass",
 		status: "active",
 		autoContinue: true,
-		tokenBudget: 10_000,
 		usage: { activeSeconds: 65, tokensUsed: 2500 },
 		sisyphus: true,
 		activePath: ".pi/goals/active_goal.md",
@@ -29,7 +28,6 @@ test("renderGoalWidgetLines renders a distinct Sisyphus goal beacon", () => {
 	assert.doesNotMatch(lines[0], /▰|▱/);
 	assert.match(lines[1], /^├─ ⟡ Componentize the goal widget/);
 	assert.doesNotMatch(lines.join("\n"), /pulse/);
-	assert.match(lines[2], /^├─ budget 10K .* remaining 7\.5K/);
 	assert.match(lines.at(-1) ?? "", /^└─ \.pi\/goals\/active_goal\.md/);
 });
 

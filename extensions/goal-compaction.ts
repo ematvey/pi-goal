@@ -1,7 +1,5 @@
 import {
   formatDuration,
-  formatRemainingTokens,
-  formatTokenBudget,
   formatTokenValue,
   statusLabel,
   truncateText,
@@ -18,9 +16,7 @@ export function buildGoalCompactSummary(goal: GoalRecord, events: GoalLedgerEven
   const lines: string[] = [];
   lines.push(`Goal ${goal.id} — ${statusLabel(goal)}`);
   lines.push(`  Objective: ${truncateText(goal.objective, 200)}`);
-  if (goal.tokenBudget !== null) {
-    lines.push(`  Budget: ${formatTokenValue(goal.usage.tokensUsed)} / ${formatTokenValue(goal.tokenBudget)}`);
-  } else if (goal.usage.tokensUsed > 0) {
+  if (goal.usage.tokensUsed > 0) {
     lines.push(`  Usage: ${formatTokenValue(goal.usage.tokensUsed)}`);
   }
   if (goal.usage.activeSeconds > 0) {
@@ -40,9 +36,6 @@ export function buildGoalCompactSummary(goal: GoalRecord, events: GoalLedgerEven
           break;
         case "goal_tweaked":
           lines.push(`    - tweaked: ${event.changeSummary}`);
-          break;
-        case "budget_updated":
-          lines.push(`    - budget updated: ${event.tokenBudget === null ? "none" : formatTokenValue(event.tokenBudget)}`);
           break;
         case "completion_requested":
           lines.push(`    - completion requested${event.summary ? `: ${truncateText(event.summary, 80)}` : ""}`);

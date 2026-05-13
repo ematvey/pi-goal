@@ -16,7 +16,7 @@ import {
 
 function goal(id: string, overrides: Partial<GoalRecord> = {}): GoalRecord {
 	return {
-		...createGoal({ objective: `=== Goal ===\nObjective: ${id}`, autoContinue: true, tokenBudget: null, sisyphus: false }, Date.UTC(2026, 0, Number(id.replace(/\D/g, "")) || 1, 3, 4, 5)),
+		...createGoal({ objective: `=== Goal ===\nObjective: ${id}`, autoContinue: true, sisyphus: false }, Date.UTC(2026, 0, Number(id.replace(/\D/g, "")) || 1, 3, 4, 5)),
 		id,
 		activePath: `.pi/goals/active_goal_${id}.md`,
 		...overrides,
@@ -76,7 +76,6 @@ test("goal list and selector labels expose focus without storing it in goals", (
 	const list = buildGoalListText(pool, "g2");
 	assert.match(list, /^Open goals: 2/);
 	assert.match(list, /^\* g2/m);
-	assert.match(list, /budget none/);
 	assert.match(buildUnfocusedOpenGoalsSummary(2), /No goal is focused/);
 	assert.match(buildUnfocusedOpenGoalsSummary(2), /\/goal-focus/);
 });

@@ -8,10 +8,9 @@ export type GoalLedgerEvent =
   | { type: "goal_created"; goalId: string; objective: string; sisyphus: boolean; autoContinue: boolean; at: string }
   | { type: "goal_focused"; goalId: string; reason: string; at: string }
   | { type: "goal_unfocused"; reason: string; at: string }
-  | { type: "goal_paused"; goalId: string; reason: string; suggestedAction?: string; status?: "paused" | "budgetLimited"; at: string }
+  | { type: "goal_paused"; goalId: string; reason: string; suggestedAction?: string; status?: "paused"; at: string }
   | { type: "goal_resumed"; goalId: string; reason: string; at: string }
   | { type: "goal_tweaked"; goalId: string; changeSummary: string; at: string }
-  | { type: "budget_updated"; goalId: string; tokenBudget: number | null; at: string }
   | { type: "completion_requested"; goalId: string; summary?: string; at: string }
   | { type: "audit_started"; goalId: string; provider?: string; model?: string; thinkingLevel?: string; at: string }
   | { type: "audit_result"; goalId: string; verdict: "approved" | "disapproved" | "error"; report: string; at: string }
@@ -29,12 +28,11 @@ export interface GoalLedgerReadResult {
 
 export interface ReconstructedGoalState {
   goalId: string;
-  latestStatus: "active" | "paused" | "budgetLimited" | "complete" | "aborted" | "unknown";
+  latestStatus: "active" | "paused" | "complete" | "aborted" | "unknown";
   latestFocus: boolean;
   latestPauseReason?: string;
   latestPauseSuggestedAction?: string;
   latestAuditorResult?: { verdict: "approved" | "disapproved" | "error"; report: string; at: string };
-  latestBudget: number | null;
   createdAt?: string;
   completedAt?: string;
   abortedAt?: string;
@@ -131,13 +129,11 @@ function isValidLedgerEvent(value: unknown): value is GoalLedgerEvent {
     case "goal_unfocused":
       return typeof obj.reason === "string";
     case "goal_paused":
-      return typeof obj.goalId === "string" && typeof obj.reason === "string" && (obj.suggestedAction === undefined || typeof obj.suggestedAction === "string") && (obj.status === undefined || obj.status === "paused" || obj.status === "budgetLimited");
+      return typeof obj.goalId === "string" && typeof obj.reason === "string" && (obj.suggestedAction === undefined || typeof obj.suggestedAction === "string") && (obj.status === undefined || obj.status === "paused");
     case "goal_resumed":
       return typeof obj.goalId === "string" && typeof obj.reason === "string";
     case "goal_tweaked":
       return typeof obj.goalId === "string" && typeof obj.changeSummary === "string";
-    case "budget_updated":
-      return typeof obj.goalId === "string" && (obj.tokenBudget === null || (typeof obj.tokenBudget === "number" && Number.isFinite(obj.tokenBudget)));
     case "completion_requested":
       return typeof obj.goalId === "string" && (obj.summary === undefined || typeof obj.summary === "string");
     case "audit_started":
@@ -165,8 +161,6 @@ function sanitizeEvent(event: GoalLedgerEvent): GoalLedgerEvent {
       return { ...event, goalId: safeGoalId(event.goalId) };
     case "goal_tweaked":
       return { ...event, goalId: safeGoalId(event.goalId) };
-    case "budget_updated":
-      return { ...event, goalId: safeGoalId(event.goalId), tokenBudget: event.tokenBudget === null ? null : Math.max(0, Math.floor(event.tokenBudget)) };
     case "completion_requested":
       return { ...event, goalId: safeGoalId(event.goalId) };
     case "audit_started":
@@ -194,7 +188,6 @@ export function reconstructGoalLedger(events: GoalLedgerEvent[]): ReconstructedL
           goalId: event.goalId,
           latestStatus: "active",
           latestFocus: false,
-          latestBudget: null,
           createdAt: event.at,
         };
         goals.set(event.goalId, state);
@@ -238,11 +231,6 @@ export function reconstructGoalLedger(events: GoalLedgerEvent[]): ReconstructedL
         if (state) state.tweakedAt = event.at;
         break;
       }
-      case "budget_updated": {
-        const state = goals.get(event.goalId);
-        if (state) state.latestBudget = event.tokenBudget;
-        break;
-      }
       case "completion_requested": {
         // No status change until audit_result or goal_completed
         break;
@@ -261,8 +249,7 @@ export function reconstructGoalLedger(events: GoalLedgerEvent[]): ReconstructedL
       case "goal_completed": {
         let state = goals.get(event.goalId);
         if (!state) {
-          state = { goalId: event.goalId, latestStatus: "complete", latestFocus: false, latestBudget: null };
-        }
+          state = { goalId: event.goalId, latestStatus: "complete", latestFocus: false };        }
         state.latestStatus = "complete";
         state.completedAt = event.at;
         terminalGoals.set(event.goalId, state);
@@ -272,8 +259,7 @@ export function reconstructGoalLedger(events: GoalLedgerEvent[]): ReconstructedL
       case "goal_aborted": {
         let state = goals.get(event.goalId);
         if (!state) {
-          state = { goalId: event.goalId, latestStatus: "aborted", latestFocus: false, latestBudget: null };
-        }
+          state = { goalId: event.goalId, latestStatus: "aborted", latestFocus: false };        }
         state.latestStatus = "aborted";
         state.abortedAt = event.at;
         terminalGoals.set(event.goalId, state);

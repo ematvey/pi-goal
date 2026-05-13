@@ -11,7 +11,6 @@ function goal(overrides: Partial<GoalRecord> = {}): GoalRecord {
     objective: "=== Goal ===\nObjective: Build tests",
     status: "active",
     autoContinue: true,
-    tokenBudget: null,
     usage: { activeSeconds: 120, tokensUsed: 5000 },
     sisyphus: false,
     createdAt: "2024-01-01T00:00:00.000Z",
@@ -21,7 +20,7 @@ function goal(overrides: Partial<GoalRecord> = {}): GoalRecord {
 }
 
 test("buildGoalCompactSummary includes status, objective, usage, and recent events", () => {
-  const g = goal({ id: "g1", tokenBudget: 10000 });
+  const g = goal({ id: "g1" });
   const events: GoalLedgerEvent[] = [
     { type: "goal_created", goalId: "g1", objective: "o1", sisyphus: false, autoContinue: true, at: "2024-01-01T00:00:00.000Z" },
     { type: "goal_paused", goalId: "g1", reason: "missing tests", at: "2024-01-01T00:00:01.000Z" },

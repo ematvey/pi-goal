@@ -28,15 +28,15 @@ Reusable logic is split into smaller modules:
 |---|---|
 | `goal-record.ts` | Goal record types, creation, cloning, usage normalization, persisted-record migration |
 | `goal-pool.ts` | Open-goal pool helpers, focus resolution, list output, selector labels, unfocused summaries |
-| `goal-core.ts` | Token-budget parsing, compact display formatting, status labels, objective title cleanup |
-| `goal-draft.ts` | Drafting prompts, plain-text draft confirmation report, draft proposal validation, drafting-stage tool gate |
-| `goal-policy.ts` | Lifecycle policy, abort/pause/resume/complete validation, budget/compaction policy, full result reports |
+| `goal-core.ts` | Compact display formatting, status labels, objective title cleanup |
+| `goal-draft.ts` | Lightweight confirmation prompt, plain-text draft confirmation report, proposal validation, drafting-stage tool gate |
+| `goal-policy.ts` | Lifecycle policy, abort/pause/resume/complete validation, compaction policy, full result reports |
 | `goal-auditor.ts` | Independent pi auditor agent prompt/config/decision parsing and completion audit execution |
 | `goal-questionnaire.ts` | Built-in questionnaire types, normalization, answer formatting, TUI question runner, proposal confirmation dialog, question-tool registration |
 | `goal-tool-names.ts` | Published tool-name constants, active-tool lists, post-stop allowlist, goal work-tool list, question-like tool detection |
-| `prompts/goal-prompts.ts` | Active-goal, continuation, budget-limit, tweak-drafting, and stale-checkpoint prompt builders |
+| `prompts/goal-prompts.ts` | Active-goal, continuation, tweak-drafting, and stale-checkpoint prompt builders |
 | `storage/goal-files.ts` | Goal path safety, serialization/parsing, active-file scanning, active-file writes, archive writes, prompt-body merge from disk |
-| `widgets/goal-widget.ts` | Above-editor Goal Beacon component, blocker/budget/status rendering, `+N open` and unfocused rendering |
+| `widgets/goal-widget.ts` | Above-editor Goal Beacon component, blocker/status rendering, `+N open` and unfocused rendering |
 | `widgets/goal-notifications.ts` | Widget-style notification text for goal lifecycle toasts |
 
 ## Lifecycle
@@ -44,11 +44,11 @@ Reusable logic is split into smaller modules:
 ```text
 /user command
   ├─ /goal-set or /goal-sisyphus
-  │    └─ draftingFor = {...}
-  │         ├─ agent asks at least one concrete question via a question-like tool
-  │         ├─ workhorse tools are blocked
-  │         └─ propose_goal_draft validates B0/B1 and asks user to confirm
-  │              ├─ Continue Chatting: stay in drafting
+  │    └─ confirmationIntent = {focus, originalTopic, startedAt}
+  │         ├─ agent clarifies only when needed, or proposes directly for concrete topics
+  │         ├─ minimal reconnaissance is prompt-guided, not hard-blocked
+  │         └─ propose_goal_draft validates focus/objective and asks user to confirm
+  │              ├─ Continue Chatting: keep clarifying without creating a goal
   │              └─ Confirm: create active goal, write .pi/goals file, focus it, print full objective
   │
   ├─ focused active goal
@@ -96,7 +96,7 @@ Because this is stored with `pi.appendEntry("pi-goal-focus", ...)`, it is sessio
 2. If the latest focus entry explicitly has `focusedGoalId: null`, or points at a missing/stale goal, remain unfocused.
 3. If no focus entry exists, merge a compatible legacy `pi-goal-state { version: 3, goal }` goal and focus it. If disk already has the same id, the disk record wins and the legacy session record only supplies focus.
 4. If no focus entry exists and exactly one open goal exists, auto-focus it for compatibility.
-5. If multiple open goals exist and no valid focus exists, remain unfocused until `/goal-focus`, `/goal-resume`, `/goal-clear`, `/goal-abort`, `/goal-pause`, `/goal-tweak`, or `/goal-budget` asks the user to choose.
+5. If multiple open goals exist and no valid focus exists, remain unfocused until `/goal-focus`, `/goal-resume`, `/goal-clear`, `/goal-abort`, `/goal-pause`, or `/goal-tweak` asks the user to choose.
 
 Focus is human-owned. No agent tool can switch focus. Lifecycle tools operate only on the focused goal.
 
@@ -118,31 +118,28 @@ The legacy `step_complete` tool remains registered as a hidden compatibility no-
 
 ## Drafting and confirmation
 
-Drafting is a user-intent collection phase. For `/goal-set` and `/goal-sisyphus`, the agent must ask at least one concrete grill-me style question through `goal_question`, `goal_questionnaire`, or another question-like user-dialogue tool before proposing. Plain assistant text is not enough because the runtime gate only observes tool calls. It should ask one decision branch at a time with a recommended answer, and it cannot inspect or edit the repo before the user confirms the goal.
+Drafting is now a lightweight user-intent confirmation conversation. For `/goal-set` and `/goal-sisyphus`, the runtime stores only a thin session-local `confirmationIntent` with the requested focus, original topic, and start time. The agent may ask a focused question when the topic is vague, or proceed directly to `propose_goal_draft` when the request is already concrete. Minimal reconnaissance is allowed when it improves the goal contract without starting substantive work.
 
 `propose_goal_draft` enforces:
 
-- a drafting flow must be active;
-- at least one drafting question must have been asked;
+- a confirmation intent must be active;
 - objective must be non-empty;
-- `draftId` must match the active drafting prompt when present;
 - `sisyphus` must match the command the user invoked.
 
-It no longer rejects merely because another open goal exists. Confirming a draft creates a new active goal and focuses it, leaving other active files untouched. Confirmation UI errors fail closed: the goal is not created and drafting remains active. After confirmation, normal work tools are available for execution immediately; drafting-time work calls remain blocked only while drafting state is active.
+A deprecated optional `draftId` parameter is accepted for compatibility but ignored; normal goal confirmation no longer depends on hidden prompt identity. Confirming a draft creates a new active goal and focuses it, leaving other active files untouched. Confirmation UI errors fail closed: the goal is not created and confirmation remains active. After confirmation, normal work tools are available for execution immediately.
 
 ## Command focus behavior
 
 - `/goal-set` and `/goal-sisyphus` create new open goals and focus the new goal.
-- `/goal-list` prints all open goals with id, status, mode, budget, usage, objective title, path, and a focus marker.
+- `/goal-list` prints all open goals with id, status, mode, usage, objective title, path, and a focus marker.
 - `/goal-focus` uses `ctx.ui.select` when multiple goals are open and updates only session focus.
 - `/goal-status` and `/goal` show the focused goal plus an `other open goals` hint.
 - `/goal-resume` resumes the focused paused goal; when unfocused with multiple open goals, it asks the user to choose. Choosing an already active goal only focuses it.
 - `/goal-replace` archives only the focused/selected goal before drafting the replacement.
 - `/goal-clear` and `/goal-abort` archive only the focused/selected goal and never clear the whole pool at once.
-- During drafting, `/goal-clear` and `/goal-abort` only cancel the drafting flow; they do not archive an unrelated focused goal unless the user invokes a lifecycle command after drafting is cancelled.
-- `/goal-tweak` revises only the focused active, budget-limited, or paused goal; when unfocused with open goals, it asks the user to choose one.
-- `/goal-pause` and `/goal-budget` also ask the user to choose when the session is unfocused and open goals exist.
-- `/goal-budget <tokens|none>` raises, sets, or removes the focused goal's token budget. If a budget-limited goal now has room to continue, it becomes active again and its continuation cap starts fresh.
+- During goal confirmation, `/goal-clear` and `/goal-abort` only cancel the confirmation flow; they do not archive an unrelated focused goal unless the user invokes a lifecycle command after confirmation is cancelled.
+- `/goal-tweak` revises only the focused active or paused goal; when unfocused with open goals, it asks the user to choose one.
+- `/goal-pause` also asks the user to choose when the session is unfocused and open goals exist.
 - `/goal-settings` opens extension settings. The current settings screen contains `auditor`, where provider/model/thinking_level are edited via free-text inputs.
 
 When `propose_goal_draft` asks for confirmation, the UI shows a full plain-text draft report rather than a Markdown preview. On confirmation, the result prints the full finalized objective in the conversation. The same objective is also written to the active goal file.
@@ -151,9 +148,9 @@ When `propose_goal_draft` asks for confirmation, the UI shows a full plain-text 
 
 Tool visibility is recomputed whenever state changes. Built-in work tools remain registered in the base prompt so they can be used after a confirmed draft; lifecycle-specific gates decide whether a call is allowed.
 
-- Drafting exposes `goal_question`, `goal_questionnaire`, `get_goal`, and `propose_goal_draft` as the intended drafting tools.
+- Goal confirmation keeps `propose_goal_draft` stable and exposes `goal_question`, `goal_questionnaire`, and `get_goal` when structured clarification helps; workhorse tools are prompt-guided rather than hidden by a hard whitelist.
 - Tweak drafting exposes question tools, `get_goal`, and `apply_goal_tweak`.
-- Active and budget-limited goals expose `get_goal`, `update_goal`, `pause_goal`, and `abort_goal`.
+- Active goals expose `get_goal`, `update_goal`, `pause_goal`, and `abort_goal`.
 - Paused goals expose `get_goal`, `update_goal`, and `abort_goal`, so the agent can complete or abandon a paused goal without resuming substantive work.
 - Unfocused sessions with open goals expose no lifecycle mutation tools; prompts and status guide the user to `/goal-focus`.
 - `step_complete` is hidden legacy compatibility.
@@ -161,7 +158,6 @@ Tool visibility is recomputed whenever state changes. Built-in work tools remain
 
 The `tool_call` interceptor blocks:
 
-- workhorse/reconnaissance tools during drafting, even if they are still present in the underlying tool registry;
 - non-`get_goal` tools after a stop tool has fired in the same turn.
 
 ## Disk format
@@ -186,17 +182,15 @@ When `autoContinue` is on, the extension queues continuation prompts after agent
 - the agent calls `abort_goal`;
 - the user invokes `/goal-pause`, `/goal-clear`, or `/goal-abort`;
 - the user aborts the turn;
-- the token budget is exhausted;
-- `PI_GOAL_MAX_AUTOCONTINUE_TURNS` is reached;
 - a turn ends without meaningful goal-work tool activity.
 
-Continuation prompts include a goal id so stale prompts can be detected and neutralized. If focus changes or the goal is archived before a queued checkpoint runs, the checkpoint becomes stale and cannot drive task work. The auto-continue cap is tracked per goal and reset on focus changes, pause, clear, complete, abort, and successful resume, so a cap-paused goal does not immediately re-pause after `/goal-resume` or `/goal-budget` recovery.
+Continuation prompts include a goal id so stale prompts can be detected and neutralized. If focus changes or the goal is archived before a queued checkpoint runs, the checkpoint becomes stale and cannot drive task work.
 
 `get_goal`, question tools, and draft proposal tools are not meaningful progress for the empty-turn gate. Only lifecycle mutations and actual workhorse tools mark a turn as goal work for continuation purposes.
 
 ## Completion output
 
-Completion is intentionally verbose in the tool result and guarded by an independent auditor agent. `update_goal(status="complete")` is valid for active, budget-limited, and paused goals; paused goals do not need to be resumed just to record completion when existing evidence is sufficient.
+Completion is intentionally verbose in the tool result and guarded by an independent auditor agent. `update_goal(status="complete")` is valid for active and paused goals; paused goals do not need to be resumed just to record completion when existing evidence is sufficient.
 
 Before archiving, the tool starts a separate in-memory pi session with a focused auditor prompt. The auditor receives the objective, executor completion summary, and goal metadata, can inspect the workspace with `read`, `grep`, `find`, `ls`, and `bash`, and must end with exactly one marker:
 
@@ -226,8 +220,7 @@ npm run check
 They cover:
 
 - parsing and display helpers;
-- token-budget extraction;
-- drafting prompt and drafting gates;
+- lightweight confirmation prompt and proposal gates;
 - questionnaire normalization and answer formatting;
 - tool-name constants and question-like detection;
 - lifecycle policy, including abort and paused-goal completion;
@@ -237,7 +230,7 @@ They cover:
 - unfocused prompt guidance;
 - focused/unfocused widget rendering;
 - Sisyphus prompt-style behavior;
-- budget and auto-continue cap behavior;
+- auto-continue empty-turn guard behavior;
 - full creation/completion report formatting.
 
 The `experiments/` harness provides end-to-end coverage with real pi sessions and model calls.

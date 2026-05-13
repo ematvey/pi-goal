@@ -39,7 +39,6 @@ test("lifecycle tool visibility keeps no-focus read-only and focused mutations s
 	assert.deepEqual(lifecycleToolNamesForGoalStatus("paused", "tweakDrafting"), ["get_goal"]);
 	assert.deepEqual(lifecycleToolNamesForGoalStatus("complete"), ["get_goal"]);
 	assert.deepEqual(lifecycleToolNamesForGoalStatus("active"), ["get_goal", "update_goal", "pause_goal", "abort_goal"]);
-	assert.deepEqual(lifecycleToolNamesForGoalStatus("budgetLimited"), ["get_goal", "update_goal", "pause_goal", "abort_goal"]);
 	assert.deepEqual(lifecycleToolNamesForGoalStatus("paused"), ["get_goal", "update_goal", "abort_goal"]);
 });
 

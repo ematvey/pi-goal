@@ -13,7 +13,6 @@ import {
 const baseConfig: GoalCreationConfig = {
 	objective: "=== Goal ===\nObjective: ship the refactor",
 	autoContinue: true,
-	tokenBudget: 1200,
 	sisyphus: false,
 };
 
@@ -23,7 +22,6 @@ test("createGoal builds stable goal records with fresh usage and requested mode"
 	assert.equal(goal.objective, baseConfig.objective);
 	assert.equal(goal.status, "active");
 	assert.equal(goal.autoContinue, true);
-	assert.equal(goal.tokenBudget, 1200);
 	assert.equal(goal.sisyphus, false);
 	assert.deepEqual(goal.usage, { tokensUsed: 0, activeSeconds: 0 });
 	assert.equal(goal.createdAt, "2026-01-02T03:04:05.000Z");
@@ -40,7 +38,6 @@ test("normalizeGoalRecord preserves known fields while sanitizing unsafe or miss
 		pauseReason: "blocked",
 		pauseSuggestedAction: "ask user",
 		autoContinue: false,
-		tokenBudget: 99.9,
 		usage: { tokensUsed: 12.9, activeSeconds: 7.2 },
 		sisyphus: true,
 		activePath: ".pi/goals/active.md",
@@ -57,7 +54,6 @@ test("normalizeGoalRecord preserves known fields while sanitizing unsafe or miss
 	assert.equal(normalized.pauseReason, "blocked");
 	assert.equal(normalized.pauseSuggestedAction, "ask user");
 	assert.equal(normalized.autoContinue, false);
-	assert.equal(normalized.tokenBudget, 99);
 	assert.deepEqual(normalized.usage, { tokensUsed: 12, activeSeconds: 7 });
 	assert.equal(normalized.sisyphus, true);
 	assert.equal(normalized.activePath, ".pi/goals/active.md");

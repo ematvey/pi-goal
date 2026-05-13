@@ -4,18 +4,13 @@ import { matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	footerStatus,
 	formatDuration,
-	formatRemainingTokens,
-	formatTokenBudget,
 	formatTokenValue,
-	parseTokenBudgetFromTopic,
 	statusLabel,
 	truncateText,
 } from "./goal-core.ts";
 import {
 	buildDraftConfirmationText,
-	evaluateDraftingToolGate,
 	goalDraftingPrompt,
-	validateDraftPromptIdentity,
 	validateGoalDraftProposal,
 	type GoalDraftingFocus,
 } from "./goal-draft.ts";
@@ -27,7 +22,6 @@ import {
 	type GoalAuditorConfig,
 } from "./goal-auditor.ts";
 import {
-	isHeadlessQuestionSufficientForDraft,
 	proposalDialogFailureMessage,
 	registerQuestionnaireTools,
 	shouldAutoConfirmProposal,
@@ -45,7 +39,6 @@ import {
 	GOAL_PROGRESS_TOOL_NAMES,
 	lifecycleToolNamesForGoalStatus,
 	TWEAK_APPLY_TOOL_NAME,
-	isQuestionLikeToolName,
 } from "./goal-tool-names.ts";
 import {
 	asRecord,
@@ -92,8 +85,6 @@ import {
 	resolveSessionFocus,
 } from "./goal-pool.ts";
 import {
-	budgetBlock,
-	budgetLimitPrompt,
 	continuationPrompt,
 	goalPrompt,
 	goalTweakDraftingPrompt,
@@ -106,16 +97,13 @@ import { GoalWidgetComponent } from "./widgets/goal-widget.ts";
 
 import {
 	abortGoalCommandMessage,
-	applyGoalBudgetUpdate,
 	buildAbortedByAgentGoal,
 	buildCompletionReport,
 	buildGoalCreatedReport,
 	buildPausedByAgentGoal,
 	clearGoalCommandMessage,
-	parseGoalBudgetUpdate,
 	shouldArmPostCompactReminder,
 	shouldInjectPostCompactReminder,
-	statusAfterBudgetLimit,
 	validateGoalAbort,
 	validateGoalCompletion,
 	validatePauseGoal,
@@ -154,44 +142,25 @@ const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
 let tweakDraftingFor: string | null = null;
 
 /**
- * Phase 5 D + B1: when non-null, a /goal-set or /goal-sisyphus drafting flow
- * is in progress. During that window:
- *   - propose_goal_draft tool is the ONLY way to commit the goal (UI confirm)
- *   - create_goal tool is hidden from the agent
- *   - schema gate B1 (focus consistency) fires
- *     when the agent calls propose_goal_draft
- *
- * Cleared after goal is created (confirmed) or the user replaces/clears it.
+ * Thin session-local confirmation intent for /goal-set and /goal-sisyphus.
+ * It protects mode consistency and user confirmation without turning drafting
+ * into a separate long-running runtime state machine.
  */
-interface DraftingState {
+interface GoalConfirmationIntent {
 	focus: GoalDraftingFocus;
-	originalTopic: string;       // user's exact input to /goal-set or /goal-sisyphus
-	draftId: string;
+	originalTopic: string;
 	startedAt: number;
-	questionsAsked: number;
 }
-let draftingFor: DraftingState | null = null;
-const draftingNudgesByDraftId = new Map<string, number>();
-
-/**
- * Parsed token budget from the user's initial topic, to be injected automatically
- * into the next create_goal call. The agent never sees tokenBudget as a writable
- * tool parameter; only the user can specify it (conversationally in the topic,
- * or later via /goal-tweak). Cleared after consumption.
- */
-let pendingBudget: number | null = null;
+let confirmationIntent: GoalConfirmationIntent | null = null;
 
 
 // ---------- summaries ----------
 
 function usageLines(goal: GoalRecord): string[] {
-	const lines = [
+	return [
 		`Time spent: ${formatDuration(goal.usage.activeSeconds)}`,
 		`Tokens used: ${formatTokenValue(goal.usage.tokensUsed)}`,
-		`Token budget: ${formatTokenBudget(goal)}`,
 	];
-	if (goal.tokenBudget !== null) lines.push(`Tokens remaining: ${formatRemainingTokens(goal)}`);
-	return lines;
 }
 
 function detailedSummary(goal: GoalRecord | null): string {
@@ -215,12 +184,7 @@ function detailedSummary(goal: GoalRecord | null): string {
 
 function oneLineSummary(goal: GoalRecord | null): string {
 	if (!goal) return "No goal is set.";
-	const tail =
-		goal.tokenBudget !== null
-			? ` [${formatTokenValue(goal.usage.tokensUsed).split(" ")[0]} / ${formatTokenValue(goal.tokenBudget).split(" ")[0]}]`
-			: goal.usage.tokensUsed > 0
-				? ` [${formatTokenValue(goal.usage.tokensUsed).split(" ")[0]}]`
-				: "";
+	const tail = goal.usage.tokensUsed > 0 ? ` [${formatTokenValue(goal.usage.tokensUsed).split(" ")[0]}]` : "";
 	return `${statusLabel(goal)}${tail} - ${truncateText(goal.objective)}`;
 }
 
@@ -252,19 +216,12 @@ function renderGoalResult(result: { details?: unknown; content: Array<{ type: st
 
 function normalizeGoalEventDetails(value: unknown): GoalEventDetails {
 	const raw = asRecord(value);
-	const kind: GoalEventKind =
-		raw?.kind === "stale" ? "stale"
-			: raw?.kind === "budget_limit" ? "budget_limit"
-				: raw?.kind === "drafting" ? "drafting"
-					: "checkpoint";
+	const kind: GoalEventKind = raw?.kind === "stale" ? "stale" : raw?.kind === "drafting" ? "drafting" : "checkpoint";
 	const goalId = typeof raw?.goalId === "string" ? raw.goalId : "unknown";
 	const focus: DraftingFocus | undefined = raw?.focus === "sisyphus" ? "sisyphus" : raw?.focus === "goal" ? "goal" : undefined;
-	const status =
-		raw?.status === "active" || raw?.status === "paused" || raw?.status === "complete" || raw?.status === "budgetLimited"
-			? (raw.status as GoalStatus)
-			: undefined;
+	const status = raw?.status === "active" || raw?.status === "paused" || raw?.status === "complete" ? (raw.status as GoalStatus) : undefined;
 	const currentStatus =
-		raw?.currentStatus === "active" || raw?.currentStatus === "paused" || raw?.currentStatus === "complete" || raw?.currentStatus === "budgetLimited"
+		raw?.currentStatus === "active" || raw?.currentStatus === "paused" || raw?.currentStatus === "complete"
 			? (raw.currentStatus as GoalStatus)
 			: raw?.currentStatus === null
 				? null
@@ -291,9 +248,8 @@ function renderGoalEvent(message: { details?: GoalEventDetails }, options: { exp
 	const details = normalizeGoalEventDetails(message.details);
 	const label =
 		details.kind === "stale" ? "stale checkpoint"
-			: details.kind === "budget_limit" ? "budget limit"
-				: details.kind === "drafting" ? (details.focus === "sisyphus" ? "sisyphus drafting" : "goal drafting")
-					: "checkpoint";
+			: details.kind === "drafting" ? (details.focus === "sisyphus" ? "sisyphus drafting" : "goal drafting")
+				: "checkpoint";
 	if (!options.expanded) {
 		return new Text(theme.fg("customMessageLabel", "Goal ") + theme.fg("customMessageText", label), 0, 0);
 	}
@@ -331,12 +287,7 @@ function extractGoalIdFromInjectedMessage(text: string): string | null {
 	// by accident, and the structure is grep-able / parse-able by external tooling.
 	const xmlMatch = text.match(/^<pi_goal_continuation\s+goal_id=\"([^\"]+)\"/);
 	if (xmlMatch) return xmlMatch[1] ?? null;
-	const match = text.match(/^\[(?:GOAL CHECKPOINT|GOAL CONTINUATION|GOAL STALE|GOAL BUDGET LIMIT) goalId=([^\]\s]+)\]/);
-	return match?.[1] ?? null;
-}
-
-function extractDraftIdFromInjectedMessage(text: string): string | null {
-	const match = text.match(/^\[GOAL DRAFTING\b[^\]]*\bdraftId=([^\]\s]+)/);
+	const match = text.match(/^\[(?:GOAL CHECKPOINT|GOAL CONTINUATION|GOAL STALE) goalId=([^\]\s]+)\]/);
 	return match?.[1] ?? null;
 }
 
@@ -436,7 +387,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	const accounting = {
 		activeGoalId: null as string | null,
 		lastAccountedAt: null as number | null,
-		budgetWarningSentFor: null as string | null,
 	};
 
 	const draftingHiddenWorkTools = [
@@ -460,7 +410,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			active.delete(QUESTION_TOOL_NAME);
 			active.delete(QUESTIONNAIRE_TOOL_NAME);
 			for (const name of ACTIVE_GOAL_TOOL_NAMES) active.delete(name);
-			const phase = draftingFor !== null ? "drafting" : tweakDraftingFor !== null ? "tweakDrafting" : "normal";
+			const phase = confirmationIntent !== null ? "drafting" : tweakDraftingFor !== null ? "tweakDrafting" : "normal";
 			const lifecycleTools = lifecycleToolNamesForGoalStatus(state.goal?.status, phase);
 			for (const name of lifecycleTools) active.add(name);
 			// Sisyphus is now a prompt/criteria style, not a separate step-counter
@@ -476,23 +426,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			} else {
 				active.delete(TWEAK_APPLY_TOOL_NAME);
 			}
-			// Phase 5 D: propose_goal_draft is only active during /goal-set or
-			// /goal-sisyphus drafting; create_goal is ALWAYS hidden (hard invariant).
-			if (draftingFor !== null) {
-				// Soft gate relaxation: work tools are no longer hidden during drafting.
-				// Prompts discourage substantive execution before confirmation.
-				// B0 question gate is prompt-guided: propose_goal_draft is always visible
-				// during drafting so fully-specified topics can proceed directly.
-				active.add(PROPOSE_DRAFT_TOOL_NAME);
+			// Keep the commit tool available and let its validator enforce that a
+			// drafting flow is active. This avoids fragile hidden-tool drift after
+			// question turns, compaction, or active-tool resync.
+			active.add(PROPOSE_DRAFT_TOOL_NAME);
+			// create_goal stays hidden — hard invariant: user must confirm via propose_goal_draft.
+			active.delete(CREATE_GOAL_TOOL_NAME);
+			if (confirmationIntent !== null) {
 				active.add(QUESTION_TOOL_NAME);
 				active.add(QUESTIONNAIRE_TOOL_NAME);
-			} else {
-				active.delete(PROPOSE_DRAFT_TOOL_NAME);
-				// create_goal stays hidden — hard invariant: user must confirm via propose_goal_draft.
-				active.delete(CREATE_GOAL_TOOL_NAME);
-				if (state.goal?.status === "active") {
-					for (const name of goalExecutionWorkTools) active.add(name);
-				}
+			} else if (state.goal?.status === "active") {
+				for (const name of goalExecutionWorkTools) active.add(name);
 			}
 			pi.setActiveTools(Array.from(active));
 		} catch {}
@@ -583,7 +527,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			goalsById = fresh;
 			focusedGoalId = null;
 			clearStoppedRuntimeState();
-			accounting.budgetWarningSentFor = null;
 			if (current) resetGetGoalNudgeState(current.id);
 			if (tweakDraftingFor !== null) tweakDraftingFor = null;
 			syncGoalTools();
@@ -597,7 +540,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		goalsById.set(reconciled.id, reconciled);
 		focusedGoalId = reconciled.id;
 		if (reconciled.status !== "active" || !reconciled.autoContinue) clearContinuationState();
-		if (reconciled.status !== "active" && reconciled.status !== "budgetLimited") clearActiveAccounting();
+		if (reconciled.status !== "active") clearActiveAccounting();
 		return true;
 	}
 
@@ -611,7 +554,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (previousGoalId !== focusedGoalId) {
 			clearContinuationState();
 			clearActiveAccounting();
-			accounting.budgetWarningSentFor = null;
 			resetGetGoalNudgeState(previousGoalId);
 			resetGetGoalNudgeState(focusedGoalId);
 			if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
@@ -661,11 +603,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function beginAccounting(): void {
-		if (draftingFor !== null || tweakDraftingFor !== null) {
+		if (confirmationIntent !== null || tweakDraftingFor !== null) {
 			clearActiveAccounting();
 			return;
 		}
-		if (!state.goal || (state.goal.status !== "active" && state.goal.status !== "budgetLimited")) {
+		if (!state.goal || (state.goal.status !== "active")) {
 			clearActiveAccounting();
 			return;
 		}
@@ -684,19 +626,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		return live;
 	}
 
-	function accountProgress(
-		ctx: ExtensionContext,
-		opts: { allowBudgetSteering: boolean; completedTurnTokens?: number; accountBudgetLimited?: boolean },
-	): void {
-		if (draftingFor !== null || tweakDraftingFor !== null) {
+	function accountProgress(ctx: ExtensionContext, opts: { completedTurnTokens?: number } = {}): void {
+		if (confirmationIntent !== null || tweakDraftingFor !== null) {
 			clearActiveAccounting();
 			return;
 		}
 		if (state.goal?.activePath && !reconcileFocusedGoalFromDisk(ctx, { preserveMemoryUsage: true })) return;
-		const canAccount =
-			state.goal?.status === "active"
-			|| (opts.accountBudgetLimited === true && state.goal?.status === "budgetLimited");
-		if (!state.goal || !canAccount || accounting.activeGoalId !== state.goal.id) {
+		if (!state.goal || state.goal.status !== "active" || accounting.activeGoalId !== state.goal.id) {
 			beginAccounting();
 			return;
 		}
@@ -708,56 +644,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const tokens = Math.max(0, Math.trunc(opts.completedTurnTokens ?? 0));
 		if (tokens === 0 && elapsedSeconds === 0) return;
 
-		const wasUnderBudget = state.goal.tokenBudget === null || state.goal.usage.tokensUsed < state.goal.tokenBudget;
-		const oldStatus = state.goal.status;
 		const next = cloneGoal(state.goal);
 		next.usage.tokensUsed += tokens;
 		next.usage.activeSeconds += elapsedSeconds;
 		next.updatedAt = nowIso();
-		const newStatus = statusAfterBudgetLimit(next);
-		next.status = newStatus;
 		state.goal = next;
 		persist(ctx);
-		if (newStatus === "budgetLimited" && oldStatus !== "budgetLimited") {
-			try {
-				appendGoalEvent(ctx, {
-					type: "goal_paused",
-					goalId: next.id,
-					reason: "budget",
-					status: "budgetLimited",
-					at: next.updatedAt,
-				});
-			} catch {
-				// Ledger append failure should not crash the budget limit transition
-			}
-		}
-
-		const crossedBudget =
-			opts.allowBudgetSteering
-			&& wasUnderBudget
-			&& next.tokenBudget !== null
-			&& next.usage.tokensUsed >= next.tokenBudget
-			&& accounting.budgetWarningSentFor !== next.id;
-		if (crossedBudget) {
-			accounting.budgetWarningSentFor = next.id;
-			try {
-				pi.sendMessage<GoalEventDetails>(
-					{
-						customType: GOAL_EVENT_ENTRY,
-						content: budgetLimitPrompt(next),
-						display: false,
-						details: {
-							kind: "budget_limit",
-							goalId: next.id,
-							status: next.status,
-							objective: next.objective,
-							timestamp: Date.now(),
-						},
-					},
-					{ triggerTurn: true, deliverAs: "steer" },
-				);
-			} catch {}
-		}
 	}
 
 	function syncGoalPromptFromDisk(ctx: ExtensionContext): boolean {
@@ -918,7 +810,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			}
 		}
 		clearStoppedRuntimeState();
-		accounting.budgetWarningSentFor = null;
 		runningGoalId = null;
 		syncGoalTools();
 		updateUI(ctx);
@@ -935,14 +826,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			resetGetGoalNudgeState(focusedGoalId);
 		}
 		if (focusReason && focusChanged) appendFocusEntry(focusedGoalId, focusReason);
-		if (!state.goal || (state.goal.status !== "active" && state.goal.status !== "budgetLimited") || !state.goal.autoContinue) {
+		if (!state.goal || (state.goal.status !== "active") || !state.goal.autoContinue) {
 			clearContinuationState();
 		}
 		if (!state.goal || state.goal.status === "paused" || state.goal.status === "complete") {
 			clearActiveAccounting();
 		}
 		if (!state.goal || state.goal.id !== previousGoalId) {
-			accounting.budgetWarningSentFor = null;
 			// Drop any stale tweak-edit-gate that didn't belong to this goal.
 			if (tweakDraftingFor !== null && tweakDraftingFor !== state.goal?.id) tweakDraftingFor = null;
 		}
@@ -964,7 +854,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		next = { ...next, status, stopReason: reason, updatedAt: nowIso() };
 		setGoal(next, ctx);
 		// Append ledger event for pauses (user or agent initiated)
-		if (status === "paused" || status === "budgetLimited") {
+		if (status === "paused") {
 			try {
 				appendGoalEvent(ctx, {
 					type: "goal_paused",
@@ -1044,7 +934,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 
 	function queueContinuation(ctx: ExtensionContext, force = false): void {
-		if (draftingFor !== null || tweakDraftingFor !== null) return;
+		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
 		const goalId = state.goal.id;
 		if (!force && (continuationQueuedFor === goalId || continuationScheduledFor === goalId)) return;
@@ -1060,41 +950,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		continuationTimer.unref?.();
 	}
 
-	function queueDraftingNudge(ctx: ExtensionContext, draft: DraftingState): void {
-		const prior = draftingNudgesByDraftId.get(draft.draftId) ?? 0;
-		if (prior >= 3) return;
-		draftingNudgesByDraftId.set(draft.draftId, prior + 1);
-		const hasQuestion = draft.questionsAsked > 0;
-		const content = hasQuestion
-			? `[GOAL DRAFTING focus=${draft.focus} draftId=${draft.draftId}]
-The drafting question has already been asked and the topic looks concrete. Your next action should be a propose_goal_draft tool call with draftId=${draft.draftId}. Avoid dragging out the interview with more questions unless the user exposed new ambiguity.`
-			: `[GOAL DRAFTING focus=${draft.focus} draftId=${draft.draftId}]
-Drafting is still active. Your last response did not use a question tool. If the topic is already fully specified, you may proceed directly to propose_goal_draft. Otherwise, ask one focused question with a recommended default, then call propose_goal_draft.`;
-		pi.sendMessage<GoalEventDetails>(
-			{
-				customType: GOAL_EVENT_ENTRY,
-				content,
-				display: false,
-				details: {
-					kind: "drafting",
-					goalId: draft.draftId,
-					status: "active",
-					objective: draft.originalTopic,
-					timestamp: Date.now(),
-				},
-			},
-			{ triggerTurn: true, deliverAs: "followUp" },
-		);
-	}
-
 	function replaceGoal(config: GoalCreationConfig, ctx: ExtensionContext, startNow = true): void {
 		setGoal(createGoal(config), ctx, true, "created");
 		beginAccounting();
-		// Reset hard-cap counter — this is a fresh goal.
+		// Reset continuation nudge state — this is a fresh goal.
 		resetGetGoalNudgeState(state.goal?.id);
-		// A goal was committed — clear drafting state if any.
-		if (draftingFor) draftingNudgesByDraftId.delete(draftingFor.draftId);
-		draftingFor = null;
+		// A goal was committed — clear pending confirmation intent if any.
+		confirmationIntent = null;
 		ctx.ui.notify(buildGoalRunningNotification(config), "info");
 		if (startNow && state.goal?.autoContinue) queueContinuation(ctx, true);
 		// Append ledger event for durable history
@@ -1185,34 +1047,14 @@ Drafting is still active. Your last response did not use a question tool. If the
 			"info",
 		);
 
-		const draftId = `draft-${focus}-${Date.now().toString(36)}`;
-		// Phase 5 D + B1: arm drafting state. Schema gate fires when the
-		// agent calls propose_goal_draft. create_goal becomes hidden.
-		draftingFor = {
+		confirmationIntent = {
 			focus,
 			originalTopic: trimmed,
-			draftId,
 			startedAt: Date.now(),
-			questionsAsked: 0,
 		};
-		draftingNudgesByDraftId.delete(draftId);
 		syncGoalTools();
 		try {
-			pi.sendMessage<GoalEventDetails>(
-				{
-					customType: GOAL_EVENT_ENTRY,
-					content: goalDraftingPrompt(trimmed, focus, draftId),
-					display: false,
-					details: {
-						kind: "drafting",
-						goalId: draftId,
-						objective: trimmed,
-						focus,
-						timestamp: Date.now(),
-					},
-				},
-				{ triggerTurn: true, deliverAs: ctx.isIdle() ? "followUp" : "steer" },
-			);
+			pi.sendUserMessage(goalDraftingPrompt(trimmed, focus), { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
 		} catch (err) {
 			ctx.ui.notify(`Could not start ${label.toLowerCase()}: ${(err as Error).message}`, "error");
 		}
@@ -1278,7 +1120,6 @@ Drafting is still active. Your last response did not use a question tool. If the
 
 	async function handleGoalCommandTopic(rawTopic: string, ctx: ExtensionContext, focus: DraftingFocus, opts: { replace: boolean }): Promise<void> {
 		const topic = rawTopic.trim();
-		pendingBudget = parseTokenBudgetFromTopic(topic);
 		if (opts.replace) {
 			const replacementTarget = await chooseOpenGoal(ctx, "Replace which open goal?");
 			if (openGoals().length > 0 && !replacementTarget) return;
@@ -1318,10 +1159,6 @@ Drafting is still active. Your last response did not use a question tool. If the
 		}
 		if (currentGoal.status === "paused") {
 			ctx.ui.notify("Goal is already paused. Use /goal-resume to continue.", "info");
-			return;
-		}
-		if (currentGoal.status === "budgetLimited") {
-			ctx.ui.notify("Goal is budget-limited (not running).", "info");
 			return;
 		}
 		pauseActiveGoal(ctx);
@@ -1370,42 +1207,6 @@ Drafting is still active. Your last response did not use a question tool. If the
 			});
 		} catch {
 			// Ledger append failure should not crash resume
-		}
-	}
-
-	async function handleGoalBudget(rawArgs: string, ctx: ExtensionContext): Promise<void> {
-		reconcileFocusedGoalFromDisk(ctx);
-		if (!state.goal && openGoals().length > 0) {
-			const selected = await chooseOpenGoal(ctx, "Update budget for which open goal?");
-			if (!selected) return;
-		}
-		if (!state.goal) {
-			ctx.ui.notify("No goal is set.", "warning");
-			return;
-		}
-		const parsed = parseGoalBudgetUpdate(rawArgs);
-		if (!parsed.ok) {
-			ctx.ui.notify(parsed.message, "warning");
-			return;
-		}
-		const next = applyGoalBudgetUpdate(state.goal, { tokenBudget: parsed.tokenBudget, updatedAt: nowIso() });
-		setGoal(next, ctx);
-		resetGetGoalNudgeState(next.id);
-		if (next.status === "active" && next.autoContinue) {
-			beginAccounting();
-			queueContinuation(ctx, true);
-		}
-		ctx.ui.notify(`Goal budget updated: ${parsed.label}.`, "info");
-		// Append ledger event for budget update
-		try {
-			appendGoalEvent(ctx, {
-				type: "budget_updated",
-				goalId: next.id,
-				tokenBudget: next.tokenBudget,
-				at: next.updatedAt,
-			});
-		} catch {
-			// Ledger append failure should not crash budget update
 		}
 	}
 
@@ -1471,8 +1272,8 @@ Drafting is still active. Your last response did not use a question tool. If the
 	}
 
 	async function handleGoalClear(ctx: ExtensionContext): Promise<void> {
-		if (draftingFor !== null || tweakDraftingFor !== null) {
-			draftingFor = null;
+		if (confirmationIntent !== null || tweakDraftingFor !== null) {
+			confirmationIntent = null;
 			tweakDraftingFor = null;
 			syncGoalTools();
 			updateUI(ctx);
@@ -1490,16 +1291,16 @@ Drafting is still active. Your last response did not use a question tool. If the
 		setGoal(null, ctx, true, "cleared");
 		// Phase 5 D: also abort any in-flight drafting so the agent's next turn
 		// doesn't try to propose into a cleared slot.
-		const wasDrafting = draftingFor !== null;
-		draftingFor = null;
+		const wasDrafting = confirmationIntent !== null;
+		confirmationIntent = null;
 		syncGoalTools();
 		const msg = clearGoalCommandMessage({ archived: didArchive, wasDrafting });
 		ctx.ui.notify(msg, didArchive || wasDrafting ? "info" : "warning");
 	}
 
 	async function handleGoalAbort(ctx: ExtensionContext): Promise<void> {
-		if (draftingFor !== null || tweakDraftingFor !== null) {
-			draftingFor = null;
+		if (confirmationIntent !== null || tweakDraftingFor !== null) {
+			confirmationIntent = null;
 			tweakDraftingFor = null;
 			syncGoalTools();
 			updateUI(ctx);
@@ -1515,8 +1316,8 @@ Drafting is still active. Your last response did not use a question tool. If the
 		const didArchive = !!archived;
 		resetGetGoalNudgeState(state.goal?.id);
 		setGoal(null, ctx, true, "aborted");
-		const wasDrafting = draftingFor !== null;
-		draftingFor = null;
+		const wasDrafting = confirmationIntent !== null;
+		confirmationIntent = null;
 		syncGoalTools();
 		const msg = abortGoalCommandMessage({ archived: didArchive, wasDrafting });
 		ctx.ui.notify(msg, didArchive || wasDrafting ? "info" : "warning");
@@ -1527,7 +1328,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 
 	// /goal and /goal-status: read-only status display.
 	const statusCommand = {
-		description: "Show the current goal: objective, status, sisyphus mode, usage, budget.",
+		description: "Show the current goal: objective, status, sisyphus mode, usage.",
 		handler: async (_rawArgs: string, ctx: ExtensionContext) => {
 			await showGoalStatus(ctx);
 		},
@@ -1622,19 +1423,13 @@ Drafting is still active. Your last response did not use a question tool. If the
 		},
 	});
 
-	pi.registerCommand("goal-budget", {
-		description: "Set or remove the focused goal's token budget. Use /goal-budget <tokens|none>.",
-		handler: async (rawArgs, ctx) => {
-			await handleGoalBudget(rawArgs, ctx);
-		},
-	});
 
 	registerQuestionnaireTools(pi);
 
 	pi.registerTool(defineTool({
 		name: "get_goal",
 		label: "Get Goal",
-		description: "Get the current pi goal for this session: objective, status, auto-continue, token budget, usage, and local file paths.",
+		description: "Get the current pi goal for this session: objective, status, auto-continue, usage, and local file paths.",
 		promptSnippet: "Read the active pi goal state for the current session.",
 		promptGuidelines: [
 			"Use get_goal when you need the current goal before deciding whether to continue or mark it complete.",
@@ -1655,7 +1450,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 					nudge = "\n\n[NUDGE] You have called get_goal multiple times this turn. Prefer concrete work tools (write/read/bash/edit) to advance the goal.";
 				}
 			}
-			const lifecycleHint = view && (view.status === "active" || view.status === "budgetLimited" || view.status === "paused")
+			const lifecycleHint = view && (view.status === "active" || view.status === "paused")
 				? "\nLifecycle tools: if evidence proves the objective is satisfied, call update_goal({status: \"complete\"}); if blocked, call pause_goal({reason, suggestedAction?}); if abandoned/obsolete/unsafe, call abort_goal({reason}). For file or shell work, use the normal work tools directly (write/read/bash/edit); do not call get_goal repeatedly just to look for tools."
 				: "";
 			const text = view
@@ -1697,22 +1492,6 @@ Drafting is still active. Your last response did not use a question tool. If the
 				content: [{ type: "text", text: "create_goal REJECTED: direct goal creation is disabled. Use /goal-set or /goal-sisyphus and propose_goal_draft so the user can confirm the goal." }],
 				details: goalDetails(state.goal),
 			};
-			/* legacy implementation kept unreachable for old transcript shape reference
-			const budget = pendingBudget;
-			pendingBudget = null; // consumed
-			const config: GoalCreationConfig = {
-				objective: params.objective.trim(),
-				autoContinue: params.autoContinue ?? true,
-				tokenBudget: budget,
-				sisyphus: params.sisyphus === true,
-			};
-			if (!config.objective) throw new Error("Goal objective must not be empty.");
-			replaceGoal(config, ctx, false);
-			return {
-				content: [{ type: "text", text: buildGoalCreatedReport({ objective: config.objective, detailedSummary: detailedSummary(state.goal) }) }],
-				details: goalDetails(state.goal),
-			};
-			*/
 		},
 		renderCall(args, theme) {
 			const prefix = args?.sisyphus ? "create_goal sisyphus " : "create_goal ";
@@ -1723,12 +1502,11 @@ Drafting is still active. Your last response did not use a question tool. If the
 		},
 	}));
 
-	// Phase 5 D + B0/B1: agent's drafting-time entry point. Replaces create_goal
-	// during /goal-set or /goal-sisyphus drafting. Shows the user a full plain-text
+	// Agent's goal-confirmation entry point. Shows the user a full plain-text
 	// draft report with two choices: [Confirm] (creates the goal) or
-	// [Continue Chatting] (returns control to the agent for more interview). Schema gates:
-	//   B0 required question
-	//   B1 focus-vs-sisyphus consistency
+	// [Continue Chatting] (returns control to the agent for more clarification).
+	// Schema gates enforce focus-vs-sisyphus consistency; draftId is ignored for
+	// one-release compatibility with older prompt residue.
 	// In headless mode (no UI), auto-confirms — harness-friendly.
 	pi.registerTool(defineTool({
 		name: PROPOSE_DRAFT_TOOL_NAME,
@@ -1736,24 +1514,24 @@ Drafting is still active. Your last response did not use a question tool. If the
 		description: "During /goal-set or /goal-sisyphus drafting, propose the goal draft to the user. The user sees a full plain-text confirmation report and chooses Confirm (creates the goal) or Continue Chatting (returns control to you to refine). REPLACES create_goal during drafting.",
 		promptSnippet: "Propose the drafted goal to the user with a full plain-text Confirm / Continue Chatting dialog.",
 		promptGuidelines: [
-			"Call propose_goal_draft ONLY when you are inside a /goal-set or /goal-sisyphus drafting flow AND you have asked at least one concrete question with goal_question, goal_questionnaire, or another question-like user-dialogue tool. The B0 schema gate rejects direct proposals.",
-			"After that required question, call propose_goal_draft only when you have enough info to write a concrete goal. If the answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",
+			"Call propose_goal_draft when a /goal-set or /goal-sisyphus confirmation conversation has enough information to write a concrete goal. Ask a focused question only when the request is still ambiguous.",
+			"If an answer exposes ambiguity, keep interviewing the user — do not propose prematurely.",
 			"The user will see a full plain-text draft report plus a [Confirm] / [Continue Chatting] choice. Confirm creates the goal; Continue Chatting returns control to you to ask follow-up questions.",
 			"If the tool returns 'continue chatting', ask the user what they want changed. Do NOT propose again immediately with the same content; iterate based on their feedback first.",
-			"The sisyphus field must match the user's drafting focus: /goal-sisyphus → sisyphus=true, /goal-set → sisyphus=false. The schema enforces this; mismatched proposals are REJECTED.",
+			"The sisyphus field must match the user's confirmation focus: /goal-sisyphus → sisyphus=true, /goal-set → sisyphus=false. The schema enforces this; mismatched proposals are REJECTED.",
 			"For sisyphus goals, preserve the user's requested ordered style and completion standard. Do not add reconnaissance/preflight steps, merge steps, reorder steps, or change the mode without explicit user confirmation.",
-			"create_goal is hidden from you during drafting; propose_goal_draft is the only commit path. This is intentional — the user wants explicit say in goal creation.",
+			"create_goal is rejected; propose_goal_draft is the confirmation path. This is intentional — the user wants explicit say in goal creation.",
 		],
 		parameters: Type.Object({
 			objective: Type.String({ description: "Full goal text. For Sisyphus goals this MUST include the user's numbered steps + per-step done criteria, taken faithfully from the user's input." }),
 			autoContinue: Type.Optional(Type.Boolean({ description: "Whether pi should keep sending continuation prompts until complete. Default true." })),
 			sisyphus: Type.Optional(Type.Boolean({ description: "Must equal true for /goal-sisyphus drafting, false for /goal-set drafting. Schema-enforced via B1 gate." })),
-			draftId: Type.Optional(Type.String({ description: "Draft id from the [GOAL DRAFTING ... draftId=...] prompt. Required when present to reject stale overlapping drafts." })),
+			draftId: Type.Optional(Type.String({ description: "Deprecated compatibility field. It is accepted but ignored; current goal confirmation no longer depends on hidden draft ids." })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const validation = validateGoalDraftProposal({
-				drafting: draftingFor,
+				intent: confirmationIntent,
 				hasUnfinishedGoal: !!state.goal && state.goal.status !== "complete",
 				objective: params.objective,
 				sisyphus: params.sisyphus,
@@ -1761,7 +1539,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			});
 			if (!validation.ok) {
 				if (validation.clearDrafting) {
-					draftingFor = null;
+					confirmationIntent = null;
 					syncGoalTools();
 				}
 				return {
@@ -1769,20 +1547,18 @@ Drafting is still active. Your last response did not use a question tool. If the
 					details: goalDetails(state.goal),
 				};
 			}
-			const activeDrafting = draftingFor;
-			if (!activeDrafting) throw new Error("Drafting state disappeared during proposal validation.");
+			const activeIntent = confirmationIntent;
+			if (!activeIntent) throw new Error("Goal confirmation intent disappeared during proposal validation.");
 
 			// All schema gates passed. Decide how to confirm.
 			const objective = validation.objective;
 			const autoContinueFlag = params.autoContinue ?? true;
 			const sisyphusFlag = validation.expectedSisyphus;
-			const budgetFromTopic = pendingBudget;
 			const draftSummary = buildDraftConfirmationText({
-				focus: activeDrafting.focus,
-				originalTopic: activeDrafting.originalTopic,
+				focus: activeIntent.focus,
+				originalTopic: activeIntent.originalTopic,
 				objective,
 				autoContinue: autoContinueFlag,
-				tokenBudget: budgetFromTopic,
 			});
 
 			const headless = shouldAutoConfirmProposal({ hasUI: ctx.hasUI, autoConfirmEnv: process.env.PI_GOAL_AUTO_CONFIRM });
@@ -1794,7 +1570,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			} else {
 				// TUI: show overlay dialog.
 				try {
-					decision = await showProposalDialog(ctx, draftSummary, activeDrafting.focus);
+					decision = await showProposalDialog(ctx, draftSummary, activeIntent.focus);
 				} catch (err) {
 					const message = proposalDialogFailureMessage(err);
 					ctx.ui.notify(message, "error");
@@ -1809,11 +1585,9 @@ Drafting is still active. Your last response did not use a question tool. If the
 				const config: GoalCreationConfig = {
 					objective,
 					autoContinue: autoContinueFlag,
-					tokenBudget: budgetFromTopic,
 					sisyphus: sisyphusFlag,
 				};
-				pendingBudget = null; // consumed
-				draftingFor = null;
+				confirmationIntent = null;
 				replaceGoal(config, ctx, false);
 				syncGoalTools();
 				return {
@@ -1849,7 +1623,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			"Use update_goal with status=complete only when the pi goal objective has actually been achieved and no required work remains.",
 			"Before calling update_goal, summarize the evidence you believe proves completion; the tool will launch an independent pi auditor agent to inspect the workspace and judge the claim.",
 			"The auditor is authoritative: completion is archived only if the auditor report ends with <approved/>. If it ends with <disapproved/> or no approval marker, update_goal is rejected and the goal remains open.",
-			"Do not call update_goal merely because work is stopping, substantial progress was made, tests passed without covering every requirement, or the token budget is nearly exhausted.",
+			"Do not call update_goal merely because work is stopping, substantial progress was made, or tests passed without covering every requirement.",
 			"Do not use update_goal=complete as an escape hatch when you are blocked. If you are blocked, call pause_goal({reason, suggestedAction?}) instead so the user can intervene.",
 			"For sisyphus goals, do not mark complete until every numbered step has been executed and individually verified against its done criterion.",
 		],
@@ -1963,7 +1737,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 				details: { phase: "approved", goalId: auditTarget.id, auditor: auditor.model },
 			});
 			// Account for any remaining elapsed time before stopping.
-			accountProgress(ctx, { allowBudgetSteering: false, accountBudgetLimited: true });
+			accountProgress(ctx);
 			state.goal = auditTarget;
 			stopActiveGoal("complete", "agent", ctx);
 			const completedGoal = state.goal;
@@ -2041,7 +1815,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			const suggested = params.suggestedAction?.trim() || undefined;
 
 			// Account for any remaining elapsed time before stopping the run.
-			accountProgress(ctx, { allowBudgetSteering: false, accountBudgetLimited: true });
+			accountProgress(ctx);
 			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
 			const next = buildPausedByAgentGoal(state.goal, { reason, suggestedAction: suggested, updatedAt: nowIso() });
 			setGoal(next, ctx);
@@ -2075,7 +1849,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 	pi.registerTool(defineTool({
 		name: ABORT_GOAL_TOOL_NAME,
 		label: "Abort Goal",
-		description: "Abort the current active, budget-limited, or paused pi goal and archive it without marking it complete.",
+		description: "Abort the current active or paused pi goal and archive it without marking it complete.",
 		promptSnippet: "Abort the current pi goal only when the user asks to abandon it or the objective is obsolete/impossible.",
 		promptGuidelines: [
 			"Use abort_goal only when the user explicitly asks to abandon/cancel the current goal, or when the goal is impossible, obsolete, or unsafe to continue and should not be marked complete.",
@@ -2102,7 +1876,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			const abortedGoalId = state.goal.id;
 
 			// Account for any remaining elapsed time before abandoning the run.
-			accountProgress(ctx, { allowBudgetSteering: false, accountBudgetLimited: true });
+			accountProgress(ctx);
 			state.goal = mergeGoalPromptFromDisk(ctx, state.goal);
 			state.goal = buildAbortedByAgentGoal(state.goal, { reason, updatedAt: nowIso() });
 			const archived = archiveCurrentGoal(ctx, "agent");
@@ -2210,7 +1984,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 					details: goalDetails(state.goal),
 				};
 			}
-			if (state.goal.status !== "active" && state.goal.status !== "budgetLimited" && state.goal.status !== "paused") {
+			if (state.goal.status !== "active" && state.goal.status !== "paused") {
 				return {
 					content: [{ type: "text", text: `Goal is ${statusLabel(state.goal)}; cannot apply a tweak.` }],
 					details: goalDetails(state.goal),
@@ -2293,7 +2067,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			if (!queuedGoalId) return message;
 			if (
 				state.goal?.id === queuedGoalId
-				&& (state.goal.status === "active" || state.goal.status === "budgetLimited")
+				&& (state.goal.status === "active")
 				&& state.goal.autoContinue
 				&& latestGoalEventIndex.get(queuedGoalId) === index
 			) return message;
@@ -2339,22 +2113,12 @@ Drafting is still active. Your last response did not use a question tool. If the
 		// Phase 5 soft gate relaxation: active-goal question block and repeated get_goal
 		// block are removed. The agent is trusted to prefer work tools; prompts nudge
 		// toward concrete work without hard-stopping the turn.
-		if (draftingFor === null && tweakDraftingFor === null && state.goal?.status === "active") {
+		if (confirmationIntent === null && tweakDraftingFor === null && state.goal?.status === "active") {
 			if (event.toolName === "get_goal") {
 				const prior = activeGetGoalTurnsByGoalId.get(state.goal.id) ?? 0;
 				activeGetGoalTurnsByGoalId.set(state.goal.id, prior + 1);
 				// Nudge only: do not hard-block, but warn in tool response via get_goal execute
 			}
-		}
-		// Phase 5 soft gate relaxation: drafting whitelist is now prompt-guided.
-		// We keep tracking questionsAsked for nudges but do not block work tools.
-		if (draftingFor && isQuestionLikeToolName(event.toolName)) {
-			const eventRecord = asRecord(event);
-			const eventArgs = asRecord(eventRecord?.args);
-			const questionText = String(eventArgs?.question ?? eventArgs?.questions ?? "");
-			const shouldCount = ctx.hasUI || isHeadlessQuestionSufficientForDraft({ topic: draftingFor.originalTopic, questionText });
-			if (shouldCount) draftingFor = { ...draftingFor, questionsAsked: draftingFor.questionsAsked + 1 };
-			syncGoalTools();
 		}
 		// Track for #4 empty-turn gate.
 		if (isMeaningfulProgressToolCall(event.toolName, asRecord(event)?.args)) {
@@ -2368,27 +2132,14 @@ Drafting is still active. Your last response did not use a question tool. If the
 	});
 
 	pi.on("tool_execution_end", async (_event, ctx) => {
-		accountProgress(ctx, { allowBudgetSteering: true, accountBudgetLimited: true });
+		accountProgress(ctx);
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
 		const message = event.message as AssistantMessageLike;
-		if (draftingFor !== null || tweakDraftingFor !== null) {
-			// Phase 5 soft gate relaxation: nudge only if the agent is stuck in
-			// plain-text chat without making progress toward proposal.
-			if (
-				draftingFor !== null
-				&& !isAbortedAssistantMessage(message)
-				&& !isToolUseAssistantMessage(message)
-				&& draftingFor.questionsAsked === 0
-				&& !isHeadlessQuestionSufficientForDraft({ topic: draftingFor.originalTopic, questionText: "" })
-			) {
-				queueDraftingNudge(ctx, draftingFor);
-			}
-			return;
-		}
+		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		const tokens = assistantTurnTokens(message);
-		accountProgress(ctx, { allowBudgetSteering: true, completedTurnTokens: tokens });
+		accountProgress(ctx, { completedTurnTokens: tokens });
 
 		if (isAbortedAssistantMessage(message)) {
 			pauseActiveGoal(ctx);
@@ -2397,7 +2148,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 		refreshGoalDisplayFromDisk(ctx);
 		// If the assistant ended a turn without queuing more tool calls, push a continuation right away.
 		// #4: only queue if some real work was done this turn — otherwise the model is
-		// just chatting and we should not keep firing turns (would burn budget on noise).
+		// just chatting and we should not keep firing turns on noise.
 		if (
 			!isToolUseAssistantMessage(message)
 			&& state.goal?.status === "active"
@@ -2435,11 +2186,11 @@ Drafting is still active. Your last response did not use a question tool. If the
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
-		accountProgress(ctx, { allowBudgetSteering: false, accountBudgetLimited: true });
+		accountProgress(ctx);
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
-		if (draftingFor !== null || tweakDraftingFor !== null) return;
+		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		if (state.goal) persist(ctx);
 		beginAccounting();
 		// Arm a deterministic compaction summary for the next agent turn.
@@ -2461,17 +2212,15 @@ Drafting is still active. Your last response did not use a question tool. If the
 		syncGoalTools();
 		const currentSystemPrompt = () => ctx.getSystemPrompt?.() || event.systemPrompt;
 		const incomingGoalId = extractGoalIdFromInjectedMessage(event.prompt ?? "");
-		const incomingDraftId = extractDraftIdFromInjectedMessage(event.prompt ?? "");
 
-		const draftIdentity = validateDraftPromptIdentity({ incomingDraftId, activeDraftId: draftingFor?.draftId ?? null });
-		if (draftIdentity.block) {
-			try {
-				ctx.abort?.();
-			} catch {}
-			return { systemPrompt: `${currentSystemPrompt()}\n\n${draftIdentity.reason}` };
+		if (confirmationIntent !== null) {
+			clearContinuationState();
+			clearActiveAccounting();
+			runningGoalId = null;
+			return { systemPrompt: currentSystemPrompt() };
 		}
 
-		if (draftingFor !== null || tweakDraftingFor !== null) {
+		if (tweakDraftingFor !== null) {
 			clearContinuationState();
 			clearActiveAccounting();
 			runningGoalId = null;
@@ -2483,7 +2232,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 		// model act on a stale instruction.
 		if (incomingGoalId !== null) {
 			clearContinuationState();
-			if (!state.goal || state.goal.id !== incomingGoalId || (state.goal.status !== "active" && state.goal.status !== "budgetLimited") || !state.goal.autoContinue) {
+			if (!state.goal || state.goal.id !== incomingGoalId || (state.goal.status !== "active") || !state.goal.autoContinue) {
 				try {
 					ctx.abort?.();
 				} catch {}
@@ -2495,7 +2244,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 		} else {
 			// A user-driven turn — clear any queued continuation so we don't
 			// double-fire after the user's own message returns. Also reset the
-			// autoContinue hard-cap counter so the user always gets a fresh chain.
+			// autoContinue nudge state so the user always gets a fresh chain.
 			clearContinuationState();
 			resetGetGoalNudgeState(state.goal?.id);
 		}
@@ -2515,7 +2264,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			if (openCount > 0) return { systemPrompt: `${currentSystemPrompt()}\n\n${unfocusedOpenGoalsPrompt(openCount)}` };
 			return;
 		}
-		runningGoalId = state.goal.status === "active" || state.goal.status === "budgetLimited" ? state.goal.id : null;
+		runningGoalId = state.goal.status === "active" ? state.goal.id : null;
 		if (state.goal.status === "complete") return;
 		if (state.goal.status === "paused") {
 			const current = state.goal;
@@ -2538,23 +2287,6 @@ Drafting is still active. Your last response did not use a question tool. If the
 			}
 			return {
 				systemPrompt: `${currentSystemPrompt()}\n\n[PI GOAL PAUSED goalId=${current.id}]\n${untrustedObjectiveBlock(current)}${pauseExtras.join("\n")}${auditorExtra}\n\nThe goal is paused. Do not autonomously continue substantive work unless the user resumes it with /goal-resume. If the user explicitly asks to finish or abandon the paused goal, or the objective is already satisfied based on available evidence, you may call update_goal(status=complete) or abort_goal without resuming. Do not call pause_goal again.`,
-			};
-		}
-		if (state.goal.status === "budgetLimited") {
-			const current = state.goal;
-			// Inject durable auditor feedback if available
-			let auditorExtra = "";
-			try {
-				const ledger = readGoalLedger(ctx);
-				const auditorResult = latestAuditorResultForGoal(ledger.events, current.id);
-				if (auditorResult && auditorResult.verdict === "disapproved") {
-					auditorExtra = `\n\n[AUDITOR REJECTION] An independent auditor previously rejected a completion request for this goal. Reason: ${auditorResult.report.slice(0, 300)}\nAddress the auditor's objections before requesting completion again.`;
-				}
-			} catch {
-				// Ledger read failure should not break the prompt
-			}
-			return {
-				systemPrompt: `${currentSystemPrompt()}\n\n[PI GOAL BUDGET LIMIT goalId=${current.id}]\n${untrustedObjectiveBlock(current)}\n\n${budgetBlock(current)}${auditorExtra}\n\nThe goal is budget_limited. Do not start new substantive work for it. Summarize useful progress, identify remaining work, and leave the user a clear next step. The user can run /goal-budget <tokens|none> to raise or remove the budget and resume with a fresh auto-continue cap.`,
 			};
 		}
 		const activeGoal = state.goal;
@@ -2584,7 +2316,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
-		if (draftingFor !== null || tweakDraftingFor !== null) return;
+		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
 		const endedGoalId = runningGoalId;
 		runningGoalId = null;
 
@@ -2594,7 +2326,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 			.filter(isAbortedAssistantMessage)
 			.reduce((sum, message) => sum + assistantTurnTokens(message), 0);
 		if (abortedTokens > 0 && endedGoalId && state.goal?.id === endedGoalId) {
-			accountProgress(ctx, { allowBudgetSteering: false, completedTurnTokens: abortedTokens, accountBudgetLimited: true });
+			accountProgress(ctx, { completedTurnTokens: abortedTokens });
 		}
 
 		continuationQueuedFor = null;
@@ -2611,7 +2343,7 @@ Drafting is still active. Your last response did not use a question tool. If the
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		accountProgress(ctx, { allowBudgetSteering: false, accountBudgetLimited: true });
+		accountProgress(ctx);
 		clearContinuationTimer();
 		stopStatusRefresh();
 		terminalInputUnsubscribe?.();

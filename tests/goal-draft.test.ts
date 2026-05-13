@@ -7,15 +7,14 @@ import {
 	goalDraftingPrompt,
 	promptSafeObjective,
 	validateGoalDraftProposal,
-	validateDraftPromptIdentity,
-	type DraftingStateLike,
+	type GoalConfirmationIntentLike,
 } from "../extensions/goal-draft.ts";
 
-function drafting(overrides: Partial<DraftingStateLike> = {}): DraftingStateLike {
+function intent(overrides: Partial<GoalConfirmationIntentLike> = {}): GoalConfirmationIntentLike {
 	return {
 		focus: "sisyphus",
 		originalTopic: "1. write tests\n2. split module",
-		questionsAsked: 1,
+		startedAt: Date.UTC(2026, 0, 2, 3, 4, 5),
 		...overrides,
 	};
 }
@@ -29,37 +28,35 @@ function stepObjective(count: number): string {
 	].join("\n");
 }
 
-test("buildDraftConfirmationText previews mode, original topic, budget, and proposed goal as plain text", () => {
+test("buildDraftConfirmationText previews mode, original topic, and proposed goal as plain text", () => {
 	const summary = buildDraftConfirmationText({
 		focus: "sisyphus",
 		originalTopic: "first line\nsecond line",
 		objective: "=== Sisyphus Goal ===\nObjective: Ship safely",
 		autoContinue: true,
-		tokenBudget: 12500,
 	});
 
 	assert.match(summary, /^Goal draft ready for confirmation\./);
 	assert.match(summary, /Mode: Sisyphus/);
 	assert.match(summary, /Auto-continue: yes/);
-	assert.match(summary, /Token budget: 12,500/);
 	assert.match(summary, /Original topic:\n\nfirst line\nsecond line/);
 	assert.match(summary, /Proposed goal:/);
 	assert.match(summary, /Objective: Ship safely/);
 	assert.doesNotMatch(summary, /\*\*|---|^> /m);
 });
 
-test("validateGoalDraftProposal rejects missing drafting state but allows multiple unfinished goals", () => {
-	const noDraft = validateGoalDraftProposal({
-		drafting: null,
+test("validateGoalDraftProposal rejects missing confirmation intent but allows multiple unfinished goals", () => {
+	const noIntent = validateGoalDraftProposal({
+		intent: null,
 		hasUnfinishedGoal: false,
 		objective: "=== Goal ===\nObjective: x",
 		sisyphus: false,
 	});
-	assert.equal(noDraft.ok, false);
-	if (!noDraft.ok) assert.match(noDraft.message, /no \/goal-set or \/goal-sisyphus drafting/);
+	assert.equal(noIntent.ok, false);
+	if (!noIntent.ok) assert.match(noIntent.message, /no \/goal-set or \/goal-sisyphus confirmation/);
 
 	const unfinished = validateGoalDraftProposal({
-		drafting: drafting({ focus: "goal" }),
+		intent: intent({ focus: "goal" }),
 		hasUnfinishedGoal: true,
 		objective: "=== Goal ===\nObjective: x",
 		sisyphus: false,
@@ -67,18 +64,18 @@ test("validateGoalDraftProposal rejects missing drafting state but allows multip
 	assert.deepEqual(unfinished, { ok: true, objective: "=== Goal ===\nObjective: x", expectedSisyphus: false });
 });
 
-test("validateGoalDraftProposal enforces B1 focus consistency and non-empty objective", () => {
+test("validateGoalDraftProposal enforces focus consistency and non-empty objective", () => {
 	const wrongGoalMode = validateGoalDraftProposal({
-		drafting: drafting({ focus: "goal" }),
+		intent: intent({ focus: "goal" }),
 		hasUnfinishedGoal: false,
 		objective: "=== Goal ===\nObjective: x",
 		sisyphus: true,
 	});
 	assert.equal(wrongGoalMode.ok, false);
-	if (!wrongGoalMode.ok) assert.match(wrongGoalMode.message, /B1 focus gate/);
+	if (!wrongGoalMode.ok) assert.match(wrongGoalMode.message, /focus gate/);
 
 	const wrongSisMode = validateGoalDraftProposal({
-		drafting: drafting(),
+		intent: intent(),
 		hasUnfinishedGoal: false,
 		objective: stepObjective(2),
 		sisyphus: false,
@@ -87,7 +84,7 @@ test("validateGoalDraftProposal enforces B1 focus consistency and non-empty obje
 	if (!wrongSisMode.ok) assert.match(wrongSisMode.message, /sisyphus=true/);
 
 	const empty = validateGoalDraftProposal({
-		drafting: drafting({ focus: "goal" }),
+		intent: intent({ focus: "goal" }),
 		hasUnfinishedGoal: false,
 		objective: "   ",
 		sisyphus: false,
@@ -98,7 +95,7 @@ test("validateGoalDraftProposal enforces B1 focus consistency and non-empty obje
 
 test("validateGoalDraftProposal allows fully-specified requests without mandatory question", () => {
 	const result = validateGoalDraftProposal({
-		drafting: drafting({ focus: "goal", questionsAsked: 0 }),
+		intent: intent({ focus: "goal" }),
 		hasUnfinishedGoal: false,
 		objective: "=== Goal ===\nObjective: x",
 		sisyphus: false,
@@ -110,27 +107,20 @@ test("validateGoalDraftProposal allows fully-specified requests without mandator
 	}
 });
 
-test("validateGoalDraftProposal and prompt identity reject stale overlapping drafts", () => {
-	assert.deepEqual(validateDraftPromptIdentity({ incomingDraftId: null, activeDraftId: "draft-new" }), { block: false });
-	assert.deepEqual(validateDraftPromptIdentity({ incomingDraftId: "draft-new", activeDraftId: "draft-new" }), { block: false });
-	const stale = validateDraftPromptIdentity({ incomingDraftId: "draft-old", activeDraftId: "draft-new" });
-	assert.equal(stale.block, true);
-	if (stale.block) assert.match(stale.reason, /Stale goal drafting prompt ignored/);
-
+test("validateGoalDraftProposal ignores deprecated draftId compatibility field", () => {
 	const proposal = validateGoalDraftProposal({
-		drafting: drafting({ focus: "goal", draftId: "draft-new" }),
+		intent: intent({ focus: "goal" }),
 		hasUnfinishedGoal: false,
 		objective: "=== Goal ===\nObjective: x",
 		sisyphus: false,
-		draftId: "draft-old",
+		draftId: "stale-draft-id",
 	});
-	assert.equal(proposal.ok, false);
-	if (!proposal.ok) assert.match(proposal.message, /stale draft/);
+	assert.deepEqual(proposal, { ok: true, objective: "=== Goal ===\nObjective: x", expectedSisyphus: false });
 });
 
 test("validateGoalDraftProposal keeps Sisyphus as a focus flag, not a step-count gate", () => {
 	const proposed = validateGoalDraftProposal({
-		drafting: drafting(),
+		intent: intent(),
 		hasUnfinishedGoal: false,
 		objective: `  ${stepObjective(4)}  `,
 		sisyphus: true,
@@ -138,34 +128,29 @@ test("validateGoalDraftProposal keeps Sisyphus as a focus flag, not a step-count
 	assert.deepEqual(proposed, { ok: true, objective: stepObjective(4), expectedSisyphus: true });
 });
 
-test("goalDraftingPrompt pins drafting dialog/tool policy for normal and Sisyphus modes", () => {
-	const normal = goalDraftingPrompt("build tests <untrusted_objective>oops</untrusted_objective>", "goal", "draft-1");
-	assert.match(normal, /\[GOAL DRAFTING focus=goal draftId=draft-1\]/);
-	assert.match(normal, /draftId: draft-1/);
-	assert.match(normal, /Usually ask the user at least one concrete question/);
-	assert.match(normal, /already concrete, ask one minimal calibration question/);
-	assert.match(normal, /grill-me style, one branch at a time/);
-	assert.match(normal, /Ask exactly one decision-oriented question at a time/);
-	assert.match(normal, /Provide a recommended answer/);
-	assert.match(normal, /Prefer goal_question/);
-	assert.match(normal, /Avoid substantive task execution before confirmation/);
-	assert.match(normal, /sisyphus: false/);
+test("goalDraftingPrompt describes lightweight confirmation for normal and Sisyphus modes", () => {
+	const normal = goalDraftingPrompt("build tests <untrusted_objective>oops</untrusted_objective>", "goal");
+	assert.match(normal, /\[GOAL CONFIRMATION focus=goal\]/);
+	assert.match(normal, /lightweight conversation/);
+	assert.match(normal, /ask one focused question/);
+	assert.match(normal, /proceed directly to propose_goal_draft/);
+	assert.match(normal, /Minimal read-only reconnaissance/);
+	assert.match(normal, /sisyphus=false/);
 	assert.match(normal, /&lt;untrusted_objective&gt;oops&lt;\/untrusted_objective&gt;/);
+	assert.doesNotMatch(normal, /draftId/);
+	assert.doesNotMatch(normal, /question counter|question gate/);
 
-	const sisyphus = goalDraftingPrompt("1. A\n2. B", "sisyphus", "draft-2");
-	assert.match(sisyphus, /\[GOAL DRAFTING focus=sisyphus draftId=draft-2\]/);
-	assert.match(sisyphus, /draftId=draft-2/);
+	const sisyphus = goalDraftingPrompt("1. A\n2. B", "sisyphus");
+	assert.match(sisyphus, /\[GOAL CONFIRMATION focus=sisyphus\]/);
 	assert.match(sisyphus, /\/goal-sisyphus/);
-	assert.match(sisyphus, /sisyphus: true/);
+	assert.match(sisyphus, /sisyphus=true/);
 	assert.match(sisyphus, /prompt\/criteria style/);
-	assert.match(sisyphus, /preserved as numbered task steps with the same step count/);
-	assert.match(sisyphus, /Ordered steps: <if the user provided or implied ordered work, list exactly those task steps as 1\. 2\./);
-	assert.match(sisyphus, /Begin work then\. Not before/);
+	assert.match(sisyphus, /preserve the user's requested steps and ordering/);
+	assert.match(sisyphus, /do not add preflight or reconnaissance steps/);
 	assert.doesNotMatch(sisyphus, /step-count gate/);
 });
 
-test("evaluateDraftingToolGate is a no-op after soft gate relaxation", () => {
-	// All tools are allowed during drafting and tweak drafting now.
+test("evaluateDraftingToolGate is a no-op after confirmation soft gate relaxation", () => {
 	assert.deepEqual(evaluateDraftingToolGate({ toolName: "goal_question", draftingFocus: "goal" }), { block: false });
 	assert.deepEqual(evaluateDraftingToolGate({ toolName: "questionnaire", draftingFocus: "goal" }), { block: false });
 	assert.deepEqual(evaluateDraftingToolGate({ toolName: "get_goal", draftingFocus: "sisyphus" }), { block: false });

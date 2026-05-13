@@ -2,9 +2,9 @@
 
 ## 1. Summary
 
-`pi-goal` currently behaves like a growing workflow state machine: drafting gates, focus gates, continuation gates, tool visibility gates, lifecycle gates, completion auditing, budget limits, compaction recovery, and multi-goal focus rules all interact inside the extension runtime. This has improved safety, but it also increases hidden coupling and makes the system brittle as more multi-agent behavior is added.
+`pi-goal` currently behaves like a growing workflow state machine: drafting gates, focus gates, continuation gates, tool visibility gates, lifecycle gates, completion auditing, compaction recovery, and multi-goal focus rules all interact inside the extension runtime. This has improved safety, but it also increases hidden coupling and makes the system brittle as more multi-agent behavior is added.
 
-This PRD proposes a shift toward an agentic runtime modeled after `pi-autoresearch`: keep durable facts in append-only artifacts, use deterministic reconstruction for long-running context, and move most strategy into prompts, skills, and independent reviewer agents. The extension should enforce only the small set of invariants that protect irreversible state transitions, user ownership, path safety, cost limits, and audit integrity.
+This PRD proposes a shift toward an agentic runtime modeled after `pi-autoresearch`: keep durable facts in append-only artifacts, use deterministic reconstruction for long-running context, and move most strategy into prompts, skills, and independent reviewer agents. The extension should enforce only the small set of invariants that protect irreversible state transitions, user ownership, path safety, and audit integrity.
 
 The new system should feel less like a rigid state machine and more like an agent-operated workspace with reliable transaction logs and semantic review.
 
@@ -21,7 +21,7 @@ The current implementation has accumulated many hard runtime constraints that tr
 
 These constraints were added in response to real failures, but they create several product and engineering problems:
 
-1. **Complexity leaks into every feature.** A new lifecycle feature must reason about drafting, focus, continuation, budget, compaction, post-stop behavior, and tool gating.
+1. **Complexity leaks into every feature.** A new lifecycle feature must reason about drafting, focus, continuation, compaction, post-stop behavior, and tool gating.
 2. **Agent behavior becomes over-constrained.** The model cannot use reasonable judgment in edge cases, such as doing minimal reconnaissance before drafting a better goal.
 3. **Tests encode machinery, not outcomes.** Experiments increasingly verify that the runtime blocked specific tool calls rather than verifying that the final goal behavior was correct.
 4. **State source of truth is fragmented.** Current state is reconstructed from active markdown files, focus entries, session entries, and runtime memory.
@@ -55,7 +55,7 @@ These constraints were added in response to real failures, but they create sever
 - Do not remove the independent completion auditor.
 - Do not let agents mark goals complete without auditor approval.
 - Do not let agents autonomously switch human-owned focus.
-- Do not remove budget and auto-continue caps.
+- Do not reintroduce hard token-cost control or auto-continue-cap gates without explicit product approval.
 - Do not redesign the entire pi extension framework.
 - Do not require users to migrate existing goal files manually.
 - Do not implement a separate Sisyphus step counter; Sisyphus remains prompt/criteria style.
@@ -91,9 +91,9 @@ The current runtime uses several state sources and gates:
 - Active goal markdown files in `.pi/goals/active_goal_*.md`.
 - Archived files in `.pi/goals/archived/`.
 - Session focus entries via `pi-goal-focus`.
-- In-memory `goalsById`, `focusedGoalId`, `draftingFor`, `tweakDraftingFor`, `runningGoalId`, continuation queues, and accounting state.
+- In-memory `goalsById`, `focusedGoalId`, `confirmationIntent`, `tweakDraftingFor`, `runningGoalId`, continuation queues, and accounting state.
 - Tool visibility synchronization through `syncGoalTools()`.
-- Runtime tool-call blocking for drafting, active goals, post-stop same-turn behavior, repeated `get_goal`, stale draft prompts, and stale continuation prompts.
+- Runtime tool-call blocking for lifecycle transactions, post-stop same-turn behavior, stale continuation prompts, and strict completion auditing; goal confirmation is mostly prompt-guided.
 - Independent completion auditor in `extensions/goal-auditor.ts`.
 - Prompt guidance in `extensions/prompts/goal-prompts.ts`.
 
@@ -127,13 +127,13 @@ The following behaviors remain runtime-enforced:
 
 1. **User-confirmed creation.** A durable goal is created only after `propose_goal_draft` confirmation.
 2. **No hidden direct creation.** `create_goal` remains rejected or unavailable as a normal agent path.
-3. **Stale draft protection.** A proposal with stale `draftId` cannot create or overwrite the active drafting flow.
+3. **Mode consistency.** A draft proposal cannot silently change `/goal-set` into Sisyphus or `/goal-sisyphus` into a regular goal.
 4. **Stale continuation protection.** A queued continuation for an old goal cannot perform work for a different current goal.
 5. **Human-owned focus.** The agent cannot silently switch focus between open goals.
 6. **Completion audit.** `update_goal(status="complete")` archives only if the independent auditor returns exactly one approving marker.
 7. **Path safety.** Goal files and archives must remain under expected `.pi/goals` paths.
 8. **Post-stop transaction boundary.** After pause, abort, approved completion, or applied tweak, the same turn should not continue substantive work.
-9. **Budget and auto-continue caps.** Cost-control limits remain hard.
+9. **No hard cost control/cap lifecycle.** Resource-control is outside this runtime; auto-continue uses semantic stop conditions and the empty-turn guard.
 10. **Archive/delete safety.** Terminal lifecycle operations must not destroy unrelated files or resurrect stale state.
 
 ### 7.3 Soft Guidance
@@ -169,7 +169,6 @@ type GoalLedgerEvent =
   | { type: "goal_paused"; goalId: string; reason: string; suggestedAction?: string; at: string }
   | { type: "goal_resumed"; goalId: string; reason: string; at: string }
   | { type: "goal_tweaked"; goalId: string; changeSummary: string; at: string }
-  | { type: "budget_updated"; goalId: string; tokenBudget: number | null; at: string }
   | { type: "completion_requested"; goalId: string; summary?: string; at: string }
   | { type: "audit_started"; goalId: string; provider?: string; model?: string; thinkingLevel?: string; at: string }
   | { type: "audit_result"; goalId: string; verdict: "approved" | "disapproved" | "error"; report: string; at: string }
@@ -277,7 +276,6 @@ Minimum events for first implementation:
 - goal paused;
 - goal resumed;
 - goal tweaked;
-- budget changed;
 - completion requested;
 - auditor result;
 - goal completed;
@@ -307,10 +305,10 @@ The system must provide a deterministic goal summary for compaction and post-com
 
 Acceptance criteria:
 
-- Summary includes focused goal, open goals, status, objective, latest lifecycle events, budget, and latest auditor result.
+- Summary includes focused goal, open goals, status, objective, latest lifecycle events, and latest auditor result.
 - Summary does not depend on LLM summarization.
 - Summary remains useful after long sessions.
-- Tests cover active, paused, budget-limited, no-focus, multi-goal, and auditor-rejected cases.
+- Tests cover active, paused, no-focus, multi-goal, and auditor-rejected cases.
 
 ### FR4: Durable Auditor Feedback
 
@@ -412,7 +410,7 @@ Acceptance criteria:
 ### Performance
 
 - Ledger reading should handle reasonably long sessions.
-- Compaction summary should cap recent events, e.g. last 20 or last 50 relevant events.
+- Compaction summary should guard recent events, e.g. last 20 or last 50 relevant events.
 - No expensive auditor or reconstruction work should run on every trivial UI refresh.
 
 ### Security and Safety
@@ -461,7 +459,7 @@ Make ledger reconstruction participate in `loadState`.
 
 Delete or simplify unused gates and phase machinery.
 
-- `questionsAsked` no longer controls proposal eligibility.
+- `questionsAsked`, normal-goal `draftId`, and drafting nudges are removed from the `/goal-set` confirmation path.
 - Drafting tool gate becomes no-op or is removed.
 - Repeated `get_goal` block removed.
 - Prompt text no longer references runtime gates for soft behavior.
@@ -526,10 +524,11 @@ Exit criteria:
 
 Deliverables:
 
-- Relax B0 question gate.
+- Relax the required-question gate.
 - Relax drafting workhorse block.
 - Relax active question block.
 - Replace repeated `get_goal` block with nudge.
+- Simplify `/goal-set` confirmation to a thin intent instead of a hidden draft-id/question-counter state machine.
 - Update prompts and tests.
 
 Exit criteria:
@@ -615,7 +614,7 @@ Mitigation:
 
 Mitigation:
 
-- Summaries cap recent events.
+- Summaries guard recent events.
 - Keep event payloads concise.
 - Consider per-goal event files or archival later.
 
@@ -685,7 +684,6 @@ Keep outcome tests for:
 - completion quality;
 - abort/pause/clear;
 - focus ownership;
-- budget cap;
 - compaction recovery.
 
 Remove or rewrite tests that require:
@@ -744,12 +742,12 @@ Proposed decisions:
 
 - Confirm before durable goal creation.
 - Reject direct hidden `create_goal` creation path.
-- Reject stale draft identity.
+- Reject draft proposals that mismatch the user's requested goal mode.
 - Abort stale continuation identity.
 - Preserve human-owned focus.
 - Require independent auditor approval for completion.
 - Keep path safety for active/archive files.
-- Enforce budget and auto-continue caps.
+- Avoid resource lifecycle gates unless the product explicitly reintroduces them.
 - Prevent same-turn substantive work after terminal/pause/tweak transaction.
 
 ### Soft Prompt-Guided Behaviors

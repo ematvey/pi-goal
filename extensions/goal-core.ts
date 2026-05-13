@@ -5,9 +5,8 @@ export interface GoalUsageLike {
 
 export interface GoalDisplayRecordLike {
 	objective: string;
-	status: "active" | "paused" | "budgetLimited" | "complete";
+	status: "active" | "paused" | "complete";
 	autoContinue: boolean;
-	tokenBudget: number | null;
 	usage: GoalUsageLike;
 	sisyphus: boolean;
 	stopReason?: "user" | "agent";
@@ -15,18 +14,6 @@ export interface GoalDisplayRecordLike {
 
 export { isQuestionLikeToolName } from "./goal-tool-names.ts";
 
-
-export function parseTokenBudgetFromTopic(topic: string): number | null {
-	// Look for patterns like "5000 tokens", "10000 token budget", "预算 20000".
-	const beforeKeyword = topic.match(/\b(\d{3,})\s*(tokens?|token[-\s]?budget|token[-\s]?cap)\b/i)
-		?? topic.match(/(\d{3,})\s*预算/);
-	const afterBudgetWord = topic.match(/(?:token[-\s]?budget|token[-\s]?cap)\s*(\d{3,})\b/i)
-		?? topic.match(/预算\s*(\d{3,})/);
-	const raw = beforeKeyword?.[1] ?? afterBudgetWord?.[1];
-	if (!raw) return null;
-	const n = Number(raw);
-	return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
-}
 
 export function truncateText(value: string, max = 120): string {
 	const oneLine = value.replace(/\s+/g, " ").trim();
@@ -73,19 +60,9 @@ export function formatDuration(seconds: number): string {
 	return `${secs}s`;
 }
 
-export function formatTokenBudget(goal: Pick<GoalDisplayRecordLike, "tokenBudget">): string {
-	return goal.tokenBudget === null ? "none" : formatTokenValue(goal.tokenBudget);
-}
-
-export function formatRemainingTokens(goal: Pick<GoalDisplayRecordLike, "tokenBudget" | "usage">): string {
-	if (goal.tokenBudget === null) return "unbounded";
-	return formatTokenValue(Math.max(0, goal.tokenBudget - goal.usage.tokensUsed));
-}
-
 export function statusLabel(goal: Pick<GoalDisplayRecordLike, "sisyphus" | "status" | "autoContinue" | "stopReason">): string {
 	const prefix = goal.sisyphus ? "sisyphus " : "";
 	if (goal.status === "active" && goal.autoContinue) return `${prefix}running`;
-	if (goal.status === "budgetLimited") return `${prefix}budget_limited`;
 	if (goal.status === "paused" && goal.stopReason === "agent") return `${prefix}paused (agent)`;
 	return `${prefix}${goal.status}`;
 }
@@ -94,7 +71,6 @@ export function footerStatus(goal: GoalDisplayRecordLike): string {
 	const usageBits: string[] = [];
 	if (goal.usage.activeSeconds > 0) usageBits.push(formatDuration(goal.usage.activeSeconds));
 	if (goal.usage.tokensUsed > 0) usageBits.push(formatTokenValue(goal.usage.tokensUsed).split(" ")[0]);
-	if (goal.tokenBudget !== null) usageBits.push(`/ ${formatTokenValue(goal.tokenBudget).split(" ")[0]}`);
 	const usage = usageBits.length > 0 ? ` [${usageBits.join(" ")}]` : "";
 	const prefix = goal.sisyphus ? "goal✊" : "goal";
 	return `${prefix}: ${statusLabel(goal)}${usage} - ${truncateText(goal.objective, 60)}`;

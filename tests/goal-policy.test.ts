@@ -3,18 +3,15 @@ import test from "node:test";
 
 import {
 	abortGoalCommandMessage,
-	applyGoalBudgetUpdate,
 	buildAbortedByAgentGoal,
 	buildCompletionReport,
 	buildGoalCreatedReport,
 	buildPausedByAgentGoal,
 	clearGoalCommandMessage,
 	isGoalUnfinished,
-	parseGoalBudgetUpdate,
 	shouldArmPostCompactReminder,
 	shouldInjectPostCompactReminder,
 	shouldQueueContinuation,
-	statusAfterBudgetLimit,
 	validateGoalAbort,
 	validateGoalCompletion,
 	validateGoalCreationSlot,
@@ -29,7 +26,6 @@ function goal(overrides: Partial<GoalPolicyRecordLike> = {}): GoalPolicyRecordLi
 		objective: "=== Goal ===\nObjective: test",
 		status: "active",
 		autoContinue: true,
-		tokenBudget: null,
 		usage: { tokensUsed: 0, activeSeconds: 0 },
 		sisyphus: false,
 		updatedAt: "2026-05-12T00:00:00.000Z",
@@ -93,7 +89,6 @@ test("pause, resume, and clear policy preserve human-owned lifecycle affordances
 	assert.match(rejectedMessage(validateResumeGoal(null)), /No goal is set/);
 	assert.match(rejectedMessage(validateResumeGoal(goal({ status: "complete" }))), /Goal is complete/);
 	assert.match(rejectedMessage(validateResumeGoal(goal({ status: "active", autoContinue: true }))), /already running/);
-	assert.match(rejectedMessage(validateResumeGoal(goal({ status: "budgetLimited", tokenBudget: 10, usage: { tokensUsed: 10, activeSeconds: 0 } }))), /budget-limited/);
 	assert.deepEqual(validateResumeGoal(goal({ status: "paused", autoContinue: false })), { ok: true });
 
 	assert.equal(clearGoalCommandMessage({ archived: true, wasDrafting: false }), "Goal cleared and archived.");
@@ -128,7 +123,6 @@ test("abort policy supports agent-owned abandonment without a new lifecycle stat
 	assert.match(rejectedMessage(validateGoalAbort({ goal: goal({ status: "complete" }), reason: "obsolete" })), /does not apply/);
 	assert.match(rejectedMessage(validateGoalAbort({ goal: goal(), reason: "   " })), /requires a non-empty reason/);
 	assert.deepEqual(validateGoalAbort({ goal: goal({ status: "paused", autoContinue: false }), reason: "Obsolete objective" }), { ok: true });
-	assert.deepEqual(validateGoalAbort({ goal: goal({ status: "budgetLimited" }), reason: "Obsolete objective" }), { ok: true });
 
 	const aborted = buildAbortedByAgentGoal(goal(), {
 		reason: "User replaced the work with a different request",
@@ -145,43 +139,13 @@ test("abort policy supports agent-owned abandonment without a new lifecycle stat
 	assert.equal(abortGoalCommandMessage({ archived: false, wasDrafting: false }), "No goal is set.");
 });
 
-test("budget and compaction policies are deterministic", () => {
-	assert.equal(statusAfterBudgetLimit(goal({ tokenBudget: 10, usage: { tokensUsed: 9, activeSeconds: 0 } })), "active");
-	assert.equal(statusAfterBudgetLimit(goal({ tokenBudget: 10, usage: { tokensUsed: 10, activeSeconds: 0 } })), "budgetLimited");
-	assert.equal(statusAfterBudgetLimit(goal({ status: "paused", tokenBudget: 10, usage: { tokensUsed: 20, activeSeconds: 0 } })), "paused");
-
+test("continuation and compaction policies are deterministic", () => {
 	assert.equal(shouldQueueContinuation(goal({ status: "active", autoContinue: true })), true);
 	assert.equal(shouldQueueContinuation(goal({ status: "paused", autoContinue: true })), false);
 
 	assert.equal(shouldArmPostCompactReminder(sisyphus({ status: "active" })), true);
-	assert.equal(shouldArmPostCompactReminder(goal({ status: "budgetLimited", sisyphus: false })), true);
 	assert.equal(shouldArmPostCompactReminder(sisyphus({ status: "paused", autoContinue: false })), false);
 	assert.equal(shouldInjectPostCompactReminder({ pending: true, goal: sisyphus() }), true);
 	assert.equal(shouldInjectPostCompactReminder({ pending: true, goal: goal({ sisyphus: false }) }), true);
 	assert.equal(shouldInjectPostCompactReminder({ pending: false, goal: sisyphus() }), false);
-});
-
-test("budget updates parse safely and reactivate budget-limited goals", () => {
-	assert.deepEqual(parseGoalBudgetUpdate("none"), { ok: true, tokenBudget: null, label: "none" });
-	assert.deepEqual(parseGoalBudgetUpdate("25k"), { ok: true, tokenBudget: 25_000, label: "25,000" });
-	assert.equal(parseGoalBudgetUpdate("abc").ok, false);
-
-	const updated = applyGoalBudgetUpdate(goal({
-		status: "budgetLimited",
-		autoContinue: false,
-		tokenBudget: 100,
-		usage: { tokensUsed: 100, activeSeconds: 0 },
-	}), { tokenBudget: 200, updatedAt: "2026-05-12T04:00:00.000Z" });
-	assert.equal(updated.status, "active");
-	assert.equal(updated.autoContinue, true);
-	assert.equal(updated.tokenBudget, 200);
-	assert.equal(updated.updatedAt, "2026-05-12T04:00:00.000Z");
-
-	const stillLimited = applyGoalBudgetUpdate(goal({
-		status: "budgetLimited",
-		autoContinue: false,
-		tokenBudget: 100,
-		usage: { tokensUsed: 250, activeSeconds: 0 },
-	}), { tokenBudget: 200, updatedAt: "2026-05-12T04:00:00.000Z" });
-	assert.equal(stillLimited.status, "budgetLimited");
 });

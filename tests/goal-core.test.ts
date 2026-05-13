@@ -5,24 +5,12 @@ import {
 	displayObjectiveTitle,
 	footerStatus,
 	formatDuration,
-	formatRemainingTokens,
-	formatTokenBudget,
 	formatTokenValue,
 	isQuestionLikeToolName,
-	parseTokenBudgetFromTopic,
 	statusLabel,
 	truncateText,
 	type GoalDisplayRecordLike,
 } from "../extensions/goal-core.ts";
-
-test("parseTokenBudgetFromTopic extracts user-provided token budgets", () => {
-	assert.equal(parseTokenBudgetFromTopic("please use 5000 tokens max"), 5000);
-	assert.equal(parseTokenBudgetFromTopic("token budget 10000"), 10000);
-	assert.equal(parseTokenBudgetFromTopic("10000 token budget"), 10000);
-	assert.equal(parseTokenBudgetFromTopic("预算 20000"), 20000);
-	assert.equal(parseTokenBudgetFromTopic("20000 预算"), 20000);
-	assert.equal(parseTokenBudgetFromTopic("small 99 tokens"), null);
-});
 
 test("displayObjectiveTitle strips goal block boilerplate", () => {
 	assert.equal(
@@ -48,23 +36,19 @@ test("formatters preserve existing compact duration/token/status behavior", () =
 	assert.equal(truncateText("abcdefghij", 8), "abcde...");
 });
 
-test("goal display helpers derive labels, budget, remaining, and footer", () => {
+test("goal display helpers derive labels and footer", () => {
 	const goal: GoalDisplayRecordLike = {
 		objective: "=== Goal ===\nObjective: Build test scaffolding and split helpers",
 		status: "active",
 		autoContinue: true,
-		tokenBudget: 20_000,
 		usage: { activeSeconds: 125, tokensUsed: 4_500 },
 		sisyphus: false,
 	};
 	assert.equal(statusLabel(goal), "running");
-	assert.equal(formatTokenBudget(goal), "20K (20,000) tokens");
-	assert.equal(formatRemainingTokens(goal), "16K (15,500) tokens");
-	assert.match(footerStatus(goal), /^goal: running \[2m05s 4.5K \/ 20K\] - === Goal === Objective:/);
+	assert.match(footerStatus(goal), /^goal: running \[2m05s 4.5K\] - === Goal === Objective:/);
 
 	assert.equal(statusLabel({ ...goal, sisyphus: true }), "sisyphus running");
 	assert.equal(statusLabel({ ...goal, status: "paused", stopReason: "agent" }), "paused (agent)");
-	assert.equal(statusLabel({ ...goal, status: "budgetLimited" }), "budget_limited");
 });
 
 test("isQuestionLikeToolName allows dialogue tools but not workhorse tools", () => {

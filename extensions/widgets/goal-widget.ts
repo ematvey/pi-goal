@@ -4,8 +4,6 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	displayObjectiveTitle,
 	formatDuration,
-	formatRemainingTokens,
-	formatTokenBudget,
 	formatTokenValue,
 	truncateText,
 	type GoalDisplayRecordLike,
@@ -51,7 +49,6 @@ function displayIcon(goal: GoalWidgetRecord): { icon: string; color: GoalWidgetC
 			? { icon: "⊘", color: "warning", label: "blocked" }
 			: { icon: "◐", color: "muted", label: "paused" };
 	}
-	if (goal.status === "budgetLimited") return { icon: "◑", color: "warning", label: "budget" };
 	if (goal.sisyphus) return { icon: "◆", color: "accent", label: goal.autoContinue ? "sisyphus running" : "sisyphus idle" };
 	return goal.autoContinue ? { icon: "●", color: "accent", label: "goal running" } : { icon: "○", color: "muted", label: "goal idle" };
 }
@@ -87,10 +84,6 @@ export function renderGoalWidgetLines(goal: GoalWidgetRecord | null, theme: Them
 	const titleWidth = Math.max(12, safeWidth - 8);
 	const objective = truncateText(displayObjectiveTitle(goal.objective), titleWidth);
 	body.push(`${theme.fg("accent", "⟡")} ${theme.fg("text", objective)}`);
-
-	if (goal.tokenBudget !== null) {
-		body.push(`${theme.fg("dim", "budget")} ${theme.fg("muted", `${formatTokenBudget(goal)} · remaining ${formatRemainingTokens(goal)}`)}`);
-	}
 
 	if (goal.status === "paused" && goal.stopReason === "agent" && goal.pauseReason) {
 		body.push(`${theme.fg("warning", "blocker")} ${theme.fg("warning", truncateText(goal.pauseReason, Math.max(12, safeWidth - 14)))}`);

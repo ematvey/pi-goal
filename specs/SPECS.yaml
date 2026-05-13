@@ -1,0 +1,25 @@
+version: 1
+focused: 2026-05-13-drafting-runtime-simplification
+status_vocabulary:
+  - draft
+  - ready_for_review
+  - implementing
+  - validating
+  - audit_running
+  - audit_failed
+  - completed
+  - archived
+commands:
+  focus: /spec-focus <spec-id-or-path>
+  unfocus: /spec-unfocus
+  status: /spec-status [spec-id-or-path]
+  finish: /spec-finish [spec-id-or-path]
+  settings: /specs-settings
+specs:
+  - id: 2026-05-13-drafting-runtime-simplification
+    path: specs/2026-05-13-drafting-runtime-simplification
+    title: Simplify goal drafting while hardening runtime execution and audit
+    status: completed
+    focused: true
+    last_audit: null
+    updated: 2026-05-13
