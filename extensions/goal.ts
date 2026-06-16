@@ -2190,8 +2190,19 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (event, ctx) => {
 		loadState(ctx);
 		syncTerminalInputPause(ctx);
-		if (event.reason === "resume" && !state.goal && openGoals().length > 1 && ctx.hasUI) {
-			await focusGoalCommand(ctx);
+		// Session started without explicit goal focus — remind user to focus explicitly.
+		// Never auto-connect to project goals to avoid cross-session contamination.
+		if (!state.goal && openGoals().length > 0 && ctx.hasUI) {
+			const open = openGoals().length;
+			if (event.reason === "resume" && open > 1) {
+				// On resume with multiple goals, let user pick one.
+				await focusGoalCommand(ctx);
+			} else {
+				ctx.ui.notify(
+					`Session started unfocused. ${open} open goal${open === 1 ? "" : "s"} in project. Run /goal-focus to select one.`,
+					"info",
+				);
+			}
 		}
 		// Codex behavior: prompt before reactivating a paused goal on resume.
 		if (event.reason === "resume" && state.goal?.status === "paused" && ctx.hasUI) {

@@ -39,21 +39,17 @@ export function resolveSessionFocus(args: {
 	focusEntry?: GoalFocusEntry | null;
 	legacyGoal?: GoalRecord | null;
 }): string | null {
+	// Only connect to a goal via explicit session focus entry.
+	// Never auto-connect: new sessions start unfocused by default.
+	// Users must run /goal-focus to select an existing goal.
 	const focusedGoalId = args.focusEntry?.focusedGoalId ?? null;
 	const focused = focusedGoalId ? focusedGoalFromPool(args.pool, focusedGoalId) : null;
 	if (focused && focused.status !== "complete") {
 		return focusedGoalId;
 	}
-	if (args.focusEntry) {
-		return null;
-	}
-	if (args.legacyGoal && args.legacyGoal.status !== "complete") {
-		if (args.pool.has(args.legacyGoal.id)) return args.legacyGoal.id;
-		args.pool.set(args.legacyGoal.id, cloneGoal(args.legacyGoal));
-		return args.legacyGoal.id;
-	}
-	const open = openGoalsFromPool(args.pool);
-	return open.length === 1 ? open[0]?.id ?? null : null;
+	// No explicit focus — stay unfocused. Do NOT fall back to legacyGoal
+	// or auto-pick single open goal. That causes cross-session contamination.
+	return null;
 }
 
 export function goalSelectorLabel(goal: GoalRecord, focusedGoalId: string | null): string {
