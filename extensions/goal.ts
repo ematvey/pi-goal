@@ -2311,7 +2311,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			!isToolUseAssistantMessage(message)
 			&& state.goal?.status === "active"
 			&& state.goal.autoContinue
-			&& goalWorkToolCalledThisTurn
 			&& auditorRunningFor !== state.goal?.id
 		);
 		if (auditTriggered) {
@@ -2325,12 +2324,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				.map((p: { text: string }) => p.text.trim())
 				.join("\n\n")
 				.slice(0, 2000);
-			void runAutoAudit({
-				ctx,
-				goal: auditTarget,
-				goalId,
-				completionSummary,
-			});
+			// Only run audit if the model has something substantive to evaluate.
+			// Skip very short responses (one word, "okay", etc.) to avoid
+			// auditing every conversational exchange.
+			if (completionSummary.trim().length >= 50) {
+				void runAutoAudit({
+					ctx,
+					goal: auditTarget,
+					goalId,
+					completionSummary,
+				});
+			}
 		}
 		// Only queue continuation if auto-audit was NOT triggered.
 		// When auto-audit runs, the model gets feedback from the auditor
