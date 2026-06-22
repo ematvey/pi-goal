@@ -378,6 +378,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	//   schema fix for "agent keeps writing files after pause_goal".
 	let goalWorkToolCalledThisTurn = false;
 	let turnStoppedFor: string | null = null;
+	// Prevent concurrent auditor runs. When the model ends a turn without tool
+	// calls, the auditor runs automatically. While it's running we skip further
+	// auto-audit triggers for the same goal.
+	let auditorRunningFor: string | null = null;
 
 	// #5 post-compaction resync: when a compaction just happened, the next agent
 	// turn gets an extra reminder block. Set in session_compact, consumed
@@ -878,6 +882,136 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		stopActiveGoal("paused", "user", ctx);
 		resetGetGoalNudgeState(pausedGoalId);
 		ctx.ui.notify("Goal paused.", "info");
+	}
+
+	// Auto-audit: triggered when the model ends a turn without tool calls.
+	// Treats the model's final text as a completion claim and runs the auditor.
+	async function runAutoAudit(args: {
+		ctx: ExtensionContext;
+		goal: GoalRecord;
+		goalId: string;
+		completionSummary: string;
+	}): Promise<void> {
+		// Double-check state — it may have changed since turn_end fired.
+		if (auditorRunningFor !== args.goalId) return;
+		if (!state.goal || state.goal.id !== args.goalId || state.goal.status !== "active") {
+			auditorRunningFor = null;
+			return;
+		}
+		try {
+			const auditTarget = mergeGoalPromptFromDisk(args.ctx, state.goal);
+			// Append ledger: auto-audit started
+			try {
+				appendGoalEvent(args.ctx, {
+					type: "audit_started",
+					goalId: auditTarget.id,
+					provider: undefined,
+					model: undefined,
+					thinkingLevel: undefined,
+					at: nowIso(),
+				});
+			} catch {
+				// Ledger append failure should not block audit
+			}
+			const auditorConfig = loadGoalAuditorFileConfig(args.ctx.cwd);
+			const auditorLabel = auditorConfig.provider || auditorConfig.model || auditorConfig.thinkingLevel
+				? `${auditorConfig.provider ?? "default"}/${auditorConfig.model ?? "default"}${auditorConfig.thinkingLevel ? `:${auditorConfig.thinkingLevel}` : ""}`
+				: "default";
+			try {
+				args.ctx.ui.notify(`Running auto-audit for: ${truncateText(auditTarget.objective, 80)}`, "info");
+			} catch {}
+			const auditor = await runGoalCompletionAuditor({
+				ctx: args.ctx,
+				goal: auditTarget,
+				completionSummary: args.completionSummary || undefined,
+				detailedSummary: detailedSummary(auditTarget),
+			});
+			// Append ledger: audit result
+			const verdict = auditor.approved ? "approved" : auditor.error ? "error" : "disapproved" as const;
+			try {
+				appendGoalEvent(args.ctx, {
+					type: "audit_result",
+					goalId: auditTarget.id,
+					verdict,
+					report: auditor.output || "Auditor produced no output.",
+					at: nowIso(),
+				});
+			} catch {
+				// Ledger append failure should not crash completion
+			}
+			if (auditor.approved) {
+				// Auditor approved — mark goal complete.
+				const approvalText = [
+					"Auto-audit: completion claim approved.",
+					auditor.model ? `Auditor model: ${auditor.model}${auditor.thinkingLevel ? `:${auditor.thinkingLevel}` : ""}` : undefined,
+					"",
+					auditor.output || "Auditor approved completion.",
+				].filter((line): line is string => line !== undefined).join("\n");
+				try {
+					args.ctx.ui.notify("Goal completed (auto-audit approved).", "success");
+				} catch {}
+				// Account for any remaining elapsed time before stopping.
+				accountProgress(args.ctx);
+				state.goal = auditTarget;
+				stopActiveGoal("complete", "agent", args.ctx);
+				const completedGoal = state.goal;
+				turnStoppedFor = completedGoal?.id ?? null;
+				if (completedGoal) {
+					resetGetGoalNudgeState(completedGoal.id);
+					goalsById.delete(completedGoal.id);
+					focusedGoalId = null;
+					appendFocusEntry(null, "completed");
+					syncGoalTools();
+					updateUI(args.ctx);
+					try {
+						appendGoalEvent(args.ctx, {
+							type: "goal_completed",
+							goalId: completedGoal.id,
+							archivePath: completedGoal.archivedPath,
+							at: nowIso(),
+						});
+					} catch {
+						// Ledger append failure should not crash completion
+					}
+				}
+				auditorRunningFor = null;
+			} else {
+				// Auditor disapproved — send rejection to model.
+				const rejectionText = [
+					"Auto-audit rejected.",
+					"",
+					"Goal completion rejected by independent auditor.",
+					auditor.model ? `Auditor model: ${auditor.model}${auditor.thinkingLevel ? `:${auditor.thinkingLevel}` : ""}` : undefined,
+					auditor.error ? `Auditor error: ${auditor.error}` : undefined,
+					"",
+					auditor.output || "Auditor produced no approval marker.",
+				].filter((line): line is string => line !== undefined).join("\n");
+				try {
+					args.ctx.ui.notify(`Auto-audit rejected: ${truncateText(rejectionText, 80)}`, "warn");
+				} catch {}
+				try {
+					pi.sendMessage<GoalAuditEventDetails>({
+						customType: GOAL_AUDIT_ENTRY,
+						content: rejectionText,
+						display: true,
+						details: { phase: "rejected", goalId: args.goalId, auditor: auditor.model },
+					});
+				} catch {
+					// Message send failure should not block audit flow
+				}
+				auditorRunningFor = null;
+				// When the auditor disapproves, the rejection message is sent above
+				// via pi.sendMessage. The model will see it in the next turn's context.
+				// We don't queue continuation here — the auto-audit flow is complete
+				// and the auditor's rejection provides the feedback the model needs.
+			}
+		} catch (error) {
+			// Auditor itself failed — don't block the goal lifecycle.
+			auditorRunningFor = null;
+			try {
+				args.ctx.ui.notify(`Auto-audit failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			} catch {}
+		}
 	}
 
 	function syncTerminalInputPause(ctx: ExtensionContext): void {
@@ -2113,6 +2247,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		// Per-turn flag resets (#4 + C9 fix).
 		goalWorkToolCalledThisTurn = false;
 		turnStoppedFor = null;
+		auditorRunningFor = null;
 		beginAccounting();
 		updateUI(ctx);
 	});
@@ -2166,9 +2301,43 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		refreshGoalDisplayFromDisk(ctx);
-		// If the assistant ended a turn without queuing more tool calls, push a continuation right away.
-		// #4: only queue if some real work was done this turn — otherwise the model is
-		// just chatting and we should not keep firing turns on noise.
+		// Auto-audit: when the model ends a turn without tool calls, treat it as
+		// a completion claim and run the auditor automatically. This covers the
+		// case where the model finishes its work but never calls update_goal (or
+		// the runtime hangs before the tool can execute).
+		// #4: only audit if some real work was done this turn — otherwise the model
+		// is just chatting and we should not interrupt it with an audit.
+		const auditTriggered = (
+			!isToolUseAssistantMessage(message)
+			&& state.goal?.status === "active"
+			&& state.goal.autoContinue
+			&& goalWorkToolCalledThisTurn
+			&& auditorRunningFor !== state.goal?.id
+		);
+		if (auditTriggered) {
+			auditorRunningFor = state.goal.id;
+			const goalId = state.goal.id;
+			const auditTarget = mergeGoalPromptFromDisk(ctx, state.goal);
+			// Extract model's text output as completion summary.
+			const msg = message as AssistantMessageLike;
+			const completionSummary = (msg.content ?? [])
+				.filter((p: { type?: string } | undefined): p is { type: string; text?: string } => p?.type === "text" && typeof p.text === "string" && p.text.trim().length > 0)
+				.map((p: { text: string }) => p.text.trim())
+				.join("\n\n")
+				.slice(0, 2000);
+			void runAutoAudit({
+				ctx,
+				goal: auditTarget,
+				goalId,
+				completionSummary,
+			});
+		}
+		// Only queue continuation if auto-audit was NOT triggered.
+		// When auto-audit runs, the model gets feedback from the auditor
+		// instead of a generic continuation prompt.
+		if (auditTriggered) {
+			return;
+		}
 		if (
 			!isToolUseAssistantMessage(message)
 			&& state.goal?.status === "active"
